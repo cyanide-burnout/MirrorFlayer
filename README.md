@@ -7,12 +7,9 @@ fibers: no separate process, no YAML, no MySQL sources or client library.
 The goal of the project is to replace
 [tarantool/mysql-tarantool-replication](https://github.com/tarantool/mysql-tarantool-replication)
 — `replicatord`, a separate C++ daemon built on libslave and the MySQL client
-library, configured in YAML and writing into Tarantool over the network — and
-its Python rewrites on top of
-[python-mysql-replication](https://github.com/julien-duponchelle/python-mysql-replication)
+library, configured in YAML and writing into Tarantool over the network —
 with a replicator that lives inside Tarantool. MirrorFlayer keeps the values
-those replicators wrote and continues from the GTID the Python ones stored,
-so the code reading the spaces sees no difference.
+replicatord wrote, so the code reading the spaces sees no difference.
 
 MariaDB and MySQL, with or without TLS; `mysql_native_password`,
 `caching_sha2_password` and `sha256_password`. Internals, OpenSSL findings
