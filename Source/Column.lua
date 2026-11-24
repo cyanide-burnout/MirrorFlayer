@@ -10,7 +10,7 @@ local ffi     = require('ffi')
 local bit     = require('bit')
 local decimal = require('decimal')
 
-local protocol = require('mirrorflayer.protocol')
+local protocol = require('MirrorFlayer.Protocol')
 
 local band, bor, bxor, lshift = bit.band, bit.bor, bit.bxor, bit.lshift
 local byte, sub, format = string.byte, string.sub, string.format

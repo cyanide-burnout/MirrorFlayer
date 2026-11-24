@@ -47,7 +47,7 @@ phase() {
   echo "=== phase $1"
   docker run --rm --name "$TARANTOOL" --network "$NETWORK" \
     --user "$(id -u):$(id -g)" -e HOME=/tmp -e MIRRORFLAYER_DATA=/data \
-    -v "$SOURCE:/src:ro" -v "$SOURCE/Source:/usr/share/tarantool/mirrorflayer:ro" \
+    -v "$SOURCE:/src:ro" -v "$SOURCE/Source:/usr/share/tarantool/MirrorFlayer:ro" \
     -v "$WORK/$2:/data" -w /src \
     --entrypoint env "$TARANTOOL_IMAGE" -u TT_APP_NAME -u TT_INSTANCE_NAME \
     tarantool Tests/MirrorFlayerTest.lua "$1"

@@ -1,8 +1,8 @@
 -- MirrorFlayer: replication of MySQL/MariaDB tables into Tarantool spaces
 -- over the binlog replication protocol, in a fiber of Tarantool itself
 --
---   local mirrorflayer = require('mirrorflayer')
---   local replica = mirrorflayer.new({
+--   local MirrorFlayer = require('MirrorFlayer')
+--   local replica = MirrorFlayer.new({
 --     hosts = { 'db1:3306', 'db2:3306' }, user = 'replica', password = '...',
 --     server = 1001
 --   })
@@ -13,18 +13,18 @@ local fiber = require('fiber')
 local clock = require('clock')
 local log   = require('log')
 
-local protocol = require('mirrorflayer.protocol')
-local column   = require('mirrorflayer.column')
-local binlog   = require('mirrorflayer.binlog')
-local mariadb  = require('mirrorflayer.mariadb')
-local store    = require('mirrorflayer.store')
+local protocol = require('MirrorFlayer.Protocol')
+local column   = require('MirrorFlayer.Column')
+local binlog   = require('MirrorFlayer.BinLog')
+local mariadb  = require('MirrorFlayer.MariaDB')
+local store    = require('MirrorFlayer.Store')
 
 local E = binlog.E
 
 local failure, fatal = protocol.failure, protocol.fatal
 
 local DEFAULTS = {
-  name = 'mirrorflayer',
+  name = 'MirrorFlayer',
   position = 'ReplicatorPositions',
   tls = false,
   heartbeat = 10,
@@ -115,7 +115,7 @@ function Replica:map(database, table_name, target, columns)
 end
 
 function Replica:say(level, format, ...)
-  log[level]('mirrorflayer[%s]: ' .. format, self.config.name, ...)
+  log[level]('MirrorFlayer[%s]: ' .. format, self.config.name, ...)
 end
 
 -- Connections ----------------------------------------------------------------
@@ -507,7 +507,7 @@ function Replica:start()
   self.status = 'starting'
   self:register()
   self.fiber = fiber.new(loop, self)
-  self.fiber:name('mirrorflayer:' .. self.config.name, { truncate = true })
+  self.fiber:name('MirrorFlayer:' .. self.config.name, { truncate = true })
   self.fiber:set_joinable(true)
   return self
 end

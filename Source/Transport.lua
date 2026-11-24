@@ -1,6 +1,6 @@
 -- Byte stream to the server: read(n), write(s), close()
 --
--- Plain TCP uses the socket module of Tarantool. TLS (mirrorflayer.tls) takes
+-- Plain TCP uses the socket module of Tarantool. TLS (MirrorFlayer.TLS) takes
 -- over the descriptor of an already connected socket, because MySQL switches
 -- to TLS after the greeting on the same connection; it is not available yet.
 

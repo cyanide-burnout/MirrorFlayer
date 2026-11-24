@@ -8,7 +8,7 @@ SSH       ?= ssh
 MODULES := $(wildcard Source/*.lua)
 
 ifneq ($(TLS),0)
-$(error TLS=1: mirrorflayer.tls is not implemented yet, build with TLS=0)
+$(error TLS=1: MirrorFlayer.TLS is not implemented yet, build with TLS=0)
 endif
 
 all:
@@ -20,11 +20,11 @@ check:
 	@echo checked
 
 install:
-	install -d $(DESTDIR)$(LUADIR)/mirrorflayer
-	install -m 644 $(MODULES) $(DESTDIR)$(LUADIR)/mirrorflayer/
+	install -d $(DESTDIR)$(LUADIR)/MirrorFlayer
+	install -m 644 $(MODULES) $(DESTDIR)$(LUADIR)/MirrorFlayer/
 
 uninstall:
-	rm -rf $(DESTDIR)$(LUADIR)/mirrorflayer
+	rm -rf $(DESTDIR)$(LUADIR)/MirrorFlayer
 
 # Docker test on this machine
 test:

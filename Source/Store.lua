@@ -5,7 +5,7 @@ local msgpack = require('msgpack')
 local key_def = require('key_def')
 local log     = require('log')
 
-local protocol = require('mirrorflayer.protocol')
+local protocol = require('MirrorFlayer.Protocol')
 
 local NULL = box.NULL
 
@@ -270,7 +270,7 @@ function Position:legacy()
   for _, space in ipairs({ self.space, box.space.ReplicatorPositions }) do
     local status, tuple = pcall(space.get, space, LEGACY)
     if status and tuple ~= nil and type(tuple[2]) == 'string' and tuple[2] ~= '' then
-      log.info('mirrorflayer[%s]: continuing from the position of the Python replicator %s', self.name, tuple[2])
+      log.info('MirrorFlayer[%s]: continuing from the position of the Python replicator %s', self.name, tuple[2])
       return tuple[2]
     end
   end

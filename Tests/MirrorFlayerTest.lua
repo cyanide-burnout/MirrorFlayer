@@ -12,8 +12,8 @@ local msgpack   = require('msgpack')
 local decimal   = require('decimal')
 local varbinary = require('varbinary')
 
-local mirrorflayer = require('mirrorflayer')
-local protocol     = require('mirrorflayer.protocol')
+local MirrorFlayer = require('MirrorFlayer')
+local protocol     = require('MirrorFlayer.Protocol')
 
 local phase = arg[1]
 local HOST  = os.getenv('MARIADB_HOST') or 'mirrorflayer-mariadb'
@@ -162,7 +162,7 @@ local triggered = 0
 local KEY = 1001
 
 local function replicator(only_locations)
-  local replica = mirrorflayer.new({
+  local replica = MirrorFlayer.new({
     hosts = { 'mirrorflayer-nowhere:3306', HOST .. ':3306' },
     user = 'replica', password = 'secret', server = KEY,
     heartbeat = 1, retry = 1, batch = 500

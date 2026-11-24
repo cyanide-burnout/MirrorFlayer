@@ -3,7 +3,7 @@
 
 local bit = require('bit')
 
-local protocol = require('mirrorflayer.protocol')
+local protocol = require('MirrorFlayer.Protocol')
 
 local COM_BINLOG_DUMP = 0x12
 

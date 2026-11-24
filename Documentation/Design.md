@@ -45,19 +45,19 @@ Requirements on the source: `log_bin`, `binlog_format=ROW`,
 
 ## Modules
 
-Each module is `Source/<name>.lua`, installed as `mirrorflayer/<name>.lua`.
+Each module is `Source/<Name>.lua`, installed as `MirrorFlayer/<Name>.lua`.
 
 | Module | Role |
 |--------|------|
-| `mirrorflayer` (`Source/init.lua`) | API, replication fiber, reconnection, host rotation, event dispatch |
-| `mirrorflayer.transport` | `read(n)`/`write(s)`/`close()`; plain TCP over the Tarantool `socket` |
-| `mirrorflayer.tls` (`tls.so`, C) | optional, later: TLS over the already connected descriptor, RSA-OAEP for `caching_sha2_password` |
-| `mirrorflayer.protocol` | packets, greeting, authentication, `COM_QUERY` with a streamed text result |
-| `mirrorflayer.mariadb` | MariaDB dialect: GTID format, GTID event, stream request |
-| `mirrorflayer.mysql` | MySQL dialect, later: GTID sets, `COM_BINLOG_DUMP_GTID` |
-| `mirrorflayer.binlog` | events: FORMAT_DESCRIPTION, ROTATE, QUERY, XID, TABLE_MAP, ROWS v1/v2, CRC32 |
-| `mirrorflayer.column` | type metadata and values, NULL bitmaps |
-| `mirrorflayer.store` | targets, full load, position |
+| `MirrorFlayer` (`Source/init.lua`) | API, replication fiber, reconnection, host rotation, event dispatch |
+| `MirrorFlayer.Transport` | `read(n)`/`write(s)`/`close()`; plain TCP over the Tarantool `socket` |
+| `MirrorFlayer.TLS` (`tls.so`, C) | optional, later: TLS over the already connected descriptor, RSA-OAEP for `caching_sha2_password` |
+| `MirrorFlayer.Protocol` | packets, greeting, authentication, `COM_QUERY` with a streamed text result |
+| `MirrorFlayer.MariaDB` | MariaDB dialect: GTID format, GTID event, stream request |
+| `MirrorFlayer.MySQL` | MySQL dialect, later: GTID sets, `COM_BINLOG_DUMP_GTID` |
+| `MirrorFlayer.BinLog` | events: FORMAT_DESCRIPTION, ROTATE, QUERY, XID, TABLE_MAP, ROWS v1/v2, CRC32 |
+| `MirrorFlayer.Column` | type metadata and values, NULL bitmaps |
+| `MirrorFlayer.Store` | targets, full load, position |
 
 ### Stream request (MariaDB)
 
@@ -75,7 +75,7 @@ MySQL will use `COM_BINLOG_DUMP_GTID` with an executed GTID set.
 ### TLS
 
 MySQL starts TLS after the greeting on the same TCP connection (SSL Request
-packet), so `mirrorflayer.tls` takes over the descriptor of the connected
+packet), so `MirrorFlayer.TLS` takes over the descriptor of the connected
 Tarantool socket (`sock:fd()`, `SSL_set_fd`), stays non-blocking and waits with
 `coio_wait()` on `SSL_ERROR_WANT_READ`/`WANT_WRITE`. It also provides RSA-OAEP
 for `caching_sha2_password` without TLS. It is built by the Makefile unless

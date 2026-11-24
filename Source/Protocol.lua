@@ -5,7 +5,7 @@ local ffi    = require('ffi')
 local bit    = require('bit')
 local digest = require('digest')
 
-local transport = require('mirrorflayer.transport')
+local transport = require('MirrorFlayer.Transport')
 
 local band, bor, bxor = bit.band, bit.bor, bit.bxor
 local byte, char, sub = string.byte, string.char, string.sub

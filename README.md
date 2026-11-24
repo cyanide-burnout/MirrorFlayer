@@ -18,9 +18,9 @@ Requires Tarantool 3.x and a source with `log_bin`, `binlog_format=ROW`,
 ## Usage
 
 ```lua
-local mirrorflayer = require('mirrorflayer')
+local MirrorFlayer = require('MirrorFlayer')
 
-local replica = mirrorflayer.new({
+local replica = MirrorFlayer.new({
   hosts = { 'db1.example.com:3306', 'db2.example.com:3306' },
   user = 'replica', password = '...', server = 1001,
   tls = false, position = 'ReplicatorPositions'
@@ -39,10 +39,10 @@ Configuration is Lua only.
 | `hosts`     | —              | `'host[:port]'` list; the next one is tried after a failure (Galera nodes) |
 | `user`, `password` | —       | Replication user: `REPLICATION SLAVE`, `BINLOG MONITOR` (`REPLICATION CLIENT`), `SELECT` on the mapped tables |
 | `server`    | —              | Server id of this replica, unique among the replicas of the source |
-| `tls`       | `false`        | TLS (`mirrorflayer.tls`), not implemented yet |
+| `tls`       | `false`        | TLS (`MirrorFlayer.TLS`), not implemented yet |
 | `position`  | `'ReplicatorPositions'` | Space that keeps the position, created when missing with an unsigned key as Registry creates it |
 | `key`       | `server`       | Key of the position in that space: a stable number or string of this replicator, the replica server id by default (0 is the Python replicator's) |
-| `name`      | `'mirrorflayer'` | Name in logs and the label of metrics |
+| `name`      | `'MirrorFlayer'` | Name in logs and the label of metrics |
 | `heartbeat` | `10`           | Seconds between heartbeats of an idle source; no data for three periods reconnects |
 | `timeout`   | `30`           | Connect and query timeout, seconds |
 | `batch`     | `1000`         | Rows per transaction during a full load |
@@ -69,7 +69,7 @@ is aborted.
 
 ## Values
 
-One conversion table (`mirrorflayer.column`) serves both the text result of
+One conversion table (`MirrorFlayer.Column`) serves both the text result of
 the initial load and binlog row images, so a row gives the same tuple either
 way. Values follow the Python replicator:
 
@@ -95,11 +95,12 @@ not listed (MariaDB `UUID`, `INET6`, geometry) are refused when mapped.
 ## Build and install
 
 `Source/` holds the Lua modules; they are installed as
-`$(PREFIX)/share/tarantool/mirrorflayer/`, which is what `require('mirrorflayer')`
-finds. File names stay lowercase because they are the module names.
+`$(PREFIX)/share/tarantool/MirrorFlayer/`, which is what `require('MirrorFlayer')`
+finds. Only `init.lua` is lowercase: that is the file Lua looks for in a
+package directory.
 
 ```
-make install [PREFIX=/usr] [DESTDIR=...]   # Lua modules into $(PREFIX)/share/tarantool/mirrorflayer
+make install [PREFIX=/usr] [DESTDIR=...]   # Lua modules into $(PREFIX)/share/tarantool/MirrorFlayer
 make check                                 # syntax check with tarantool
 make test                                  # Docker test, see Tests/
 ```
