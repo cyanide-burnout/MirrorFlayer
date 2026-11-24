@@ -1,6 +1,6 @@
 #!/bin/sh
 # Copies the working tree to a Docker host and runs Tests/DockerTest.sh there:
-#   Tests/RemoteTest.sh [host]
+#   Tests/RemoteTest.sh host
 # SSH overrides the ssh command; SERVER, SERVER_IMAGE and TLS go to DockerTest.sh
 set -eu
 
