@@ -16,7 +16,7 @@ local varbinary = require('varbinary')
 local MirrorFlayer = require('MirrorFlayer')
 local protocol     = require('MirrorFlayer.Protocol')
 
-local phase = arg[1]
+local phase  = arg[1]
 local HOST   = os.getenv('SERVER_HOST') or 'mirrorflayer-server'
 local SERVER = os.getenv('SERVER') or 'mariadb'
 local TLS    = os.getenv('TLS') or 'off'
