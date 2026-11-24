@@ -9,14 +9,18 @@ Usage and values are in the [README](../README.md).
   position. Decoding and metadata queries happen outside the box transaction.
   Transactions that touch no mapped table only advance the position in memory;
   it is written at most once a second and on heartbeats.
-* **Position.** A tuple `{ name, gtid_state, event_time }` in the `position`
-  space, the GTID state string as MariaDB prints it (`0-1-100,1-2-5`). On the
-  first start, without its own tuple, the position of the Python replicator —
-  `[0, gtid, 0]` in `ReplicatorPositions` — is taken. If the position space has
-  a numeric primary key (the layout Registry creates for `ReplicatorPositions`),
-  the position is kept there under key `0` as `{ 0, gtid_state, event_time }`.
-  Python stored the GTID of a transaction before applying it, so continuing from
-  its position skips the transaction it may have been applying when it stopped.
+* **Position.** A tuple `{ key, gtid_state, event_time }` in the `position`
+  space (`ReplicatorPositions` by default, the space Registry already has with
+  an unsigned primary key), the GTID state string as MariaDB prints it
+  (`0-1-100,1-2-5`). The key is the replica server id unless `key` is given:
+  it has to be unique among the replicas of the source anyway and does not
+  change when Galera nodes are added to `hosts`, which a hash of the addresses
+  would. Key 0 is the Python replicator's `[0, gtid, 0]`: without its own
+  tuple MirrorFlayer starts from it once and never writes it, so both can run
+  side by side. Python stored the GTID of a transaction before applying it, so
+  continuing from its position skips the transaction it may have been applying
+  when it stopped. `resetReplication()` of Registry truncates the space, which
+  makes the next start do a full load.
 * **Full load** (first start, error 1236, `TRUNCATE` of a mapped table, a table
   map that does not match the table definition): the GTID state
   (`@@gtid_binlog_pos`) is read first, then each table is selected with

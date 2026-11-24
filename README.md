@@ -40,8 +40,9 @@ Configuration is Lua only.
 | `user`, `password` | —       | Replication user: `REPLICATION SLAVE`, `BINLOG MONITOR` (`REPLICATION CLIENT`), `SELECT` on the mapped tables |
 | `server`    | —              | Server id of this replica, unique among the replicas of the source |
 | `tls`       | `false`        | TLS (`mirrorflayer.tls`), not implemented yet |
-| `position`  | `'MirrorFlayer'` | Space that keeps the position, created when missing |
-| `name`      | `'mirrorflayer'` | Key of the position in that space, name in logs and metrics |
+| `position`  | `'ReplicatorPositions'` | Space that keeps the position, created when missing with an unsigned key as Registry creates it |
+| `key`       | `server`       | Key of the position in that space: a stable number or string of this replicator, the replica server id by default (0 is the Python replicator's) |
+| `name`      | `'mirrorflayer'` | Name in logs and the label of metrics |
 | `heartbeat` | `10`           | Seconds between heartbeats of an idle source; no data for three periods reconnects |
 | `timeout`   | `30`           | Connect and query timeout, seconds |
 | `batch`     | `1000`         | Rows per transaction during a full load |
@@ -118,8 +119,9 @@ make test                                  # Docker test, see Tests/
    stored GTID without a full load.
 3. `purge` — changes and a purge of the binlog while down: error 1236, full
    load that also deletes rows gone from the source.
-4. `legacy` — a fresh instance with the Python position `[0, gtid, 0]` in a
-   numeric-keyed `ReplicatorPositions` continues from it.
+4. `legacy` — a fresh instance with the Python position `[0, gtid, 0]` in
+   `ReplicatorPositions` continues from it, writes its own position under the
+   server id and leaves key 0 as it was.
 
 `Tests/RemoteTest.sh [host]` copies the tree to a Docker host and
 runs the test there.

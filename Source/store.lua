@@ -239,54 +239,51 @@ Position.__index = Position
 
 local NUMERIC = { unsigned = true, integer = true, number = true }
 
--- Opens (creates when missing) the position space. The key is the replicator
--- name; a space with a numeric primary key is the layout of the Python
--- replicator, there the position lives under key 0.
-local function position(space_name, name)
+-- Key of the Python replicator, which kept [0, gtid, 0] in ReplicatorPositions
+local LEGACY = 0
+
+-- Opens the position space, created like Registry creates ReplicatorPositions
+-- when missing. key is a stable number or string of this replicator, the
+-- replica server id by default; the tuple is { key, gtid_state, event_time }.
+local function position(space_name, key, name)
   local space = box.space[space_name]
   if space == nil then
-    space = box.schema.space.create(space_name, {
-      if_not_exists = true,
-      format = { { 'Name', 'string' }, { 'GTID', 'string' }, { 'Time', 'number' } }
-    })
-    space:create_index('primary', { if_not_exists = true, parts = { 1, 'string' } })
+    space = box.schema.space.create(space_name, { if_not_exists = true })
+    space:create_index('ID', { if_not_exists = true, unique = true,
+      parts = { 1, type(key) == 'number' and 'unsigned' or 'string' } })
   end
   if space.index[0] == nil then
     protocol.fatal('position space %s has no primary index', space_name)
   end
-  local self = setmetatable({ space = space, name = name }, Position)
-  local part = space.index[0].parts[1]
-  if NUMERIC[part.type] then
-    self.key = 0
-    self.legacy = true
-    log.warn('mirrorflayer[%s]: %s has a numeric key, keeping the position under key 0', name, space_name)
-  else
-    self.key = name
+  local part = space.index[0].parts[1].type
+  if (part == 'string' and type(key) ~= 'string') or (NUMERIC[part] and type(key) ~= 'number') then
+    protocol.fatal('position space %s has a %s key, the key %s does not fit it', space_name, part, tostring(key))
   end
-  return self
+  if key == LEGACY then
+    protocol.fatal('position key 0 belongs to the Python replicator, choose another one')
+  end
+  return setmetatable({ space = space, key = key, name = name }, Position)
+end
+
+-- Position of the Python replicator: key 0 in this space or in ReplicatorPositions
+function Position:legacy()
+  for _, space in ipairs({ self.space, box.space.ReplicatorPositions }) do
+    local status, tuple = pcall(space.get, space, LEGACY)
+    if status and tuple ~= nil and type(tuple[2]) == 'string' and tuple[2] ~= '' then
+      log.info('mirrorflayer[%s]: continuing from the position of the Python replicator %s', self.name, tuple[2])
+      return tuple[2]
+    end
+  end
+  return nil
 end
 
 -- Returns the stored GTID state or nil
 function Position:get()
   local tuple = self.space:get(self.key)
-  if tuple ~= nil and not self.legacy and type(tuple[2]) == 'string' then
+  if tuple ~= nil and type(tuple[2]) == 'string' then
     return tuple[2]
   end
-  if tuple == nil and not self.legacy then
-    -- Position of the Python replicator: [0, gtid, 0] in ReplicatorPositions
-    local legacy = box.space.ReplicatorPositions
-    if legacy ~= nil and legacy ~= self.space then
-      local status, result = pcall(legacy.get, legacy, 0)
-      if status and result ~= nil then
-        log.info('mirrorflayer[%s]: continuing from the position of the Python replicator', self.name)
-        tuple = result
-      end
-    end
-  end
-  if tuple == nil or type(tuple[2]) ~= 'string' or tuple[2] == '' then
-    return nil
-  end
-  return tuple[2]
+  return self:legacy()
 end
 
 -- Stores the GTID state; call inside the transaction of the applied changes

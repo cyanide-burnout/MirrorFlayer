@@ -158,15 +158,17 @@ end
 local journal = { reset = 0, insert = 0, update = 0, delete = 0 }
 local triggered = 0
 
-local function replicator(position)
+-- The position goes to ReplicatorPositions under the server id 1001
+local KEY = 1001
+
+local function replicator(only_locations)
   local replica = mirrorflayer.new({
     hosts = { 'mirrorflayer-nowhere:3306', HOST .. ':3306' },
-    user = 'replica', password = 'secret', server = 1001,
-    position = position or 'MirrorFlayer',
+    user = 'replica', password = 'secret', server = KEY,
     heartbeat = 1, retry = 1, batch = 500
   })
   replica:map('Registry', 'Locations', 'GlobalLocations', { 'ID', 'Node', 'Kind', 'Link', 'Slot', 'Modified' })
-  if position == nil then
+  if not only_locations then
     replica:map('Registry', 'Locations', function (operation, old, new)
       assert(box.is_in_txn(), 'function target outside of a transaction')
       journal[operation] = journal[operation] + 1
@@ -271,7 +273,7 @@ local function load()
   ok(encode(box.space.Types:get(3)) == encode(box.tuple.new(nulls)), 'load: Types row 3 is all NULL')
   ok(journal.reset == 1 and journal.insert == 100, 'function target: reset and 100 inserts (%d, %d)', journal.reset, journal.insert)
   ok(triggered >= 100, 'on_replace triggers fired during the load (%d)', triggered)
-  stored_position(replica, 'mirrorflayer', target)
+  stored_position(replica, KEY, target)
 
   local inserts = journal.insert
   triggered = 0
@@ -309,7 +311,7 @@ local function load()
   ok(journal.insert - inserts == 12 and journal.update == 11 and journal.delete == 5,
     'function target: %d inserts, %d updates, %d deletes', journal.insert - inserts, journal.update, journal.delete)
   ok(triggered > 0, 'on_replace triggers fired during the stream (%d)', triggered)
-  stored_position(replica, 'mirrorflayer', target)
+  stored_position(replica, KEY, target)
   local stat = replica:stat()
   ok(type(stat.lag) == 'number' and type(stat.event_time) == 'number' and stat.event_time > 0,
     'stat: lag %s, event time %s', tostring(stat.lag), tostring(stat.event_time))
@@ -330,7 +332,7 @@ local function resume()
   exec("INSERT INTO Registry.Locations (ID, Node, Kind, Modified) VALUES (300, 6, 'S', '2026-10-10 10:10:10')")
   local target = caught_up(replica)
   locations_equal('resume stream')
-  stored_position(replica, 'mirrorflayer', target)
+  stored_position(replica, KEY, target)
   replica:stop()
 end
 
@@ -355,7 +357,7 @@ local function purge()
   locations_equal('purge')
   ok(box.space.GlobalLocations:get(1) == nil, 'rows deleted while down are removed by the reload')
   ok(box.space.GlobalProfiles:count() == 19999, 'GlobalProfiles kept 19999 rows')
-  stored_position(replica, 'mirrorflayer', target)
+  stored_position(replica, KEY, target)
   replica:stop()
 end
 
@@ -367,14 +369,15 @@ local function legacy()
   local state = sql:value('SELECT @@GLOBAL.gtid_binlog_pos')
   box.space.ReplicatorPositions:replace({ 0, state, 0 })
 
-  local replica = replicator('ReplicatorPositions')
+  local replica = replicator(true)
   exec("INSERT INTO Registry.Locations (ID, Node, Kind, Modified) VALUES (600, 8, 'L', '2026-12-12 12:12:12')")
   local target = caught_up(replica)
   ok(replica:stat().resyncs == 0, 'continued from the Python position without a full load')
   ok(box.space.GlobalLocations:count() == 1 and box.space.GlobalLocations:get(600) ~= nil,
     'only the new row arrived (%d rows)', box.space.GlobalLocations:count())
-  stored_position(replica, 0, target)
-  ok(box.space.ReplicatorPositions:get(0)[3] > 0, 'event time stored next to the GTID')
+  stored_position(replica, KEY, target)
+  ok(box.space.ReplicatorPositions:get(KEY)[3] > 0, 'event time stored next to the GTID')
+  ok(encode(box.space.ReplicatorPositions:get(0)) == encode({ 0, state, 0 }), 'the Python position is left as it was')
   replica:stop()
 end
 

@@ -4,7 +4,7 @@
 --   local mirrorflayer = require('mirrorflayer')
 --   local replica = mirrorflayer.new({
 --     hosts = { 'db1:3306', 'db2:3306' }, user = 'replica', password = '...',
---     server = 1001, position = 'ReplicatorPositions'
+--     server = 1001
 --   })
 --   replica:map('Registry', 'Locations', 'GlobalLocations', { 'ID', 'Node', 'Kind', 'Link', 'Slot', 'Modified' })
 --   replica:start()
@@ -25,7 +25,7 @@ local failure, fatal = protocol.failure, protocol.fatal
 
 local DEFAULTS = {
   name = 'mirrorflayer',
-  position = 'MirrorFlayer',
+  position = 'ReplicatorPositions',
   tls = false,
   heartbeat = 10,
   timeout = 30,
@@ -61,9 +61,10 @@ end
 
 -- Creates a replicator.
 -- config: hosts (array of 'host[:port]'), user, password, server (replica
--- server id), tls (false), position (space name), name (key of the position),
--- heartbeat (seconds), timeout (seconds), batch (rows per transaction of the
--- full load), retry (seconds between connection attempts)
+-- server id), tls (false), position (space name), key (of the position, the
+-- server id by default), name (in logs and metrics), heartbeat (seconds),
+-- timeout (seconds), batch (rows per transaction of the full load), retry
+-- (seconds between connection attempts)
 local function new(config)
   check(type(config) == 'table', 'config must be a table')
   check(type(config.hosts) == 'table' and #config.hosts > 0, 'config.hosts must be a non-empty array')
@@ -79,6 +80,11 @@ local function new(config)
   end
   check(type(options.position) == 'string', 'config.position must be a space name')
   check(type(options.name) == 'string', 'config.name must be a string')
+  if options.key == nil then
+    options.key = options.server
+  end
+  check((type(options.key) == 'number' and options.key >= 0 and options.key == math.floor(options.key)) or
+    type(options.key) == 'string', 'config.key must be an unsigned integer or a string')
   return setmetatable({
     config = options,
     sources = {},
@@ -492,7 +498,7 @@ function Replica:start()
         table.insert(source.targets, store.target(spec.target, spec.columns))
       end
     end
-    self.position = store.position(self.config.position, self.config.name)
+    self.position = store.position(self.config.position, self.config.key, self.config.name)
   end)
   if not status then
     error(tostring(problem), 2)
