@@ -11,8 +11,8 @@ library, configured in YAML and writing into Tarantool over the network — and
 its Python rewrites on top of
 [python-mysql-replication](https://github.com/julien-duponchelle/python-mysql-replication)
 with a replicator that lives inside Tarantool. MirrorFlayer keeps the values
-those replicators wrote and reads the position they stored, so the code
-reading the spaces sees no difference and the switch needs no reload.
+those replicators wrote and continues from the GTID the Python ones stored,
+so the code reading the spaces sees no difference.
 
 MariaDB and MySQL, with or without TLS; `mysql_native_password`,
 `caching_sha2_password` and `sha256_password`. Internals, OpenSSL findings
