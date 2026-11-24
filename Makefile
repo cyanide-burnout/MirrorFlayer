@@ -3,6 +3,7 @@ LUADIR    ?= $(PREFIX)/share/tarantool
 TARANTOOL ?= tarantool
 TLS       ?= 0
 HOST      ?=
+SSH       ?= ssh
 
 MODULES := $(wildcard mirrorflayer/*.lua)
 
@@ -31,6 +32,6 @@ test:
 
 # Docker test on a remote Docker host
 remote-test:
-	test/remote.sh $(HOST)
+	SSH="$(SSH)" test/remote.sh $(HOST)
 
 .PHONY: all check install uninstall test remote-test

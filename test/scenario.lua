@@ -1,0 +1,391 @@
+#!/usr/bin/env tarantool
+-- Docker test of MirrorFlayer against MariaDB, driven by test/run.sh:
+--   load    full load, values of all types, INSERT/UPDATE/DELETE over the stream
+--   resume  restart continues from the stored GTID without a full load
+--   purge   the position is purged from the binlog: error 1236, full reload
+--   legacy  a fresh instance continues from the Python position [0, gtid, 0]
+
+local root = string.match(debug.getinfo(1, 'S').source, '^@(.*)/test/[^/]*$') or '.'
+package.path = root .. '/?.lua;' .. root .. '/?/init.lua;' .. package.path
+
+local ffi = require('ffi')
+local fiber = require('fiber')
+local log = require('log')
+local msgpack = require('msgpack')
+local decimal = require('decimal')
+local varbinary = require('varbinary')
+
+local mirrorflayer = require('mirrorflayer')
+local protocol = require('mirrorflayer.protocol')
+
+local phase = arg[1]
+local HOST = os.getenv('MARIADB_HOST') or 'mirrorflayer-mariadb'
+
+require('compat').binary_data_decoding = 'new'
+
+box.cfg({ work_dir = os.getenv('MIRRORFLAYER_DATA') or '/data', log_level = 5 })
+
+-- Helpers --------------------------------------------------------------------
+
+local failures = 0
+
+local function ok(condition, format, ...)
+  local message = string.format(format, ...)
+  if condition then
+    log.info('ok: %s', message)
+  else
+    failures = failures + 1
+    log.error('FAIL: %s', message)
+  end
+end
+
+local function wait(condition, what, timeout)
+  local deadline = fiber.clock() + (timeout or 60)
+  while not condition() do
+    if fiber.clock() > deadline then
+      error('timeout waiting for ' .. what, 0)
+    end
+    fiber.sleep(0.1)
+  end
+end
+
+local function encode(value)
+  return msgpack.encode(value)
+end
+
+local sql = protocol.connect({ host = HOST, port = 3306, user = 'root', password = 'root', timeout = 30 })
+
+local function exec(...)
+  for _, statement in ipairs({ ... }) do
+    sql:query(statement)
+  end
+end
+
+exec("SET time_zone = '+00:00'")
+
+-- Schema ---------------------------------------------------------------------
+
+local TYPES = {
+  { 'TinyS', 'TINYINT', '-5', -5 },
+  { 'TinyU', 'TINYINT UNSIGNED', '250', 250 },
+  { 'Small', 'SMALLINT', '-30000', -30000 },
+  { 'Medium', 'MEDIUMINT', '-8000000', -8000000 },
+  { 'MediumU', 'MEDIUMINT UNSIGNED', '16000000', 16000000 },
+  { 'IntS', 'INT', '-2000000000', -2000000000 },
+  { 'IntU', 'INT UNSIGNED', '4000000000', 4000000000 },
+  { 'Big', 'BIGINT', '-9007199254740993', -9007199254740993LL },
+  { 'BigU', 'BIGINT UNSIGNED', '18446744073709551615', 18446744073709551615ULL },
+  { 'Flt', 'FLOAT', '1.1', tonumber(ffi.new('float', 1.1)) },
+  { 'Dbl', 'DOUBLE', '2.5e100', 2.5e100 },
+  { 'Dec1', 'DECIMAL(10,2)', '-12.30', decimal.new('-12.30') },
+  { 'Dec2', 'DECIMAL(30,12)', '123456789012345678.123456789012', decimal.new('123456789012345678.123456789012') },
+  { 'Dec3', 'DECIMAL(5,3)', '0.050', decimal.new('0.050') },
+  { 'Dt', 'DATETIME', "'2024-02-29 13:14:15'", '2024-02-29 13:14:15' },
+  { 'Dt6', 'DATETIME(6)', "'2024-02-29 13:14:15.123456'", '2024-02-29 13:14:15' },
+  { 'Ts', 'TIMESTAMP NULL', "'2024-03-01 01:02:03'", '2024-03-01 01:02:03' },
+  { 'Ts3', 'TIMESTAMP(3) NULL', "'2024-03-01 01:02:03.456'", '2024-03-01 01:02:03' },
+  { 'D', 'DATE', "'2024-12-31'", '2024-12-31' },
+  { 'T', 'TIME', "'-12:34:56'", '-12:34:56' },
+  { 'T3', 'TIME(3)', "'838:59:58.500'", '838:59:58' },
+  { 'Y', 'YEAR', '2024', 2024 },
+  { 'Ch', 'CHAR(10)', "'abc'", 'abc' },
+  { 'Vc', 'VARCHAR(300)', "'Привет'", 'Привет' },
+  { 'Tx', 'TEXT', "'long text'", 'long text' },
+  { 'Bn', 'BINARY(4)', '0x01020304', varbinary.new('\1\2\3\4') },
+  { 'Vb', 'VARBINARY(20)', '0x00FF10', varbinary.new('\0\255\16') },
+  { 'Bl', 'BLOB', '0xDEADBEEF', varbinary.new('\222\173\190\239') },
+  { 'Bt', 'BIT(10)', "b'1010101010'", 682 },
+  { 'En', "ENUM('red','green','blue')", "'green'", 'green' },
+  { 'St', "SET('a','b','c')", "'a,c'", 'a,c' },
+  { 'Js', 'JSON', [['{"k": [1, 2]}']], '{"k": [1, 2]}' }
+}
+
+local function type_columns()
+  local names = {}
+  for index, item in ipairs(TYPES) do
+    names[index] = item[1]
+  end
+  return table.concat(names, ', ')
+end
+
+local function setup_mariadb()
+  local columns, values = { 'ID INT UNSIGNED PRIMARY KEY' }, { '1' }
+  for _, item in ipairs(TYPES) do
+    table.insert(columns, item[1] .. ' ' .. item[2])
+    table.insert(values, item[3])
+  end
+  exec('DROP DATABASE IF EXISTS Registry',
+    'CREATE DATABASE Registry',
+    'USE Registry',
+    'CREATE TABLE Locations (ID INT UNSIGNED PRIMARY KEY, Node INT UNSIGNED NOT NULL, Kind CHAR(1) NOT NULL, ' ..
+      'Link INT UNSIGNED, Slot TINYINT UNSIGNED, ' ..
+      'Modified TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, Note VARCHAR(50))',
+    'CREATE TABLE Users (ID INT UNSIGNED PRIMARY KEY, Active TINYINT NOT NULL, `Call` VARCHAR(20) NOT NULL, ' ..
+      'SSID TINYINT UNSIGNED, Text VARCHAR(100))',
+    'CREATE TABLE Gateways (BMC INT UNSIGNED, TPC INT UNSIGNED, Comment VARCHAR(20), PRIMARY KEY (BMC, TPC))',
+    'CREATE TABLE Other (ID INT PRIMARY KEY AUTO_INCREMENT, Value VARCHAR(20))',
+    'CREATE TABLE Types (' .. table.concat(columns, ', ') .. ')',
+    "CREATE USER IF NOT EXISTS 'replica'@'%' IDENTIFIED BY 'secret'",
+    "GRANT SELECT, REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO 'replica'@'%'",
+    'INSERT INTO Locations (ID, Node, Kind, Link, Slot, Modified) ' ..
+      "SELECT seq, 2000 + seq % 7, 'N', IF(seq % 10 = 0, NULL, seq * 10), seq % 3, '2026-01-02 03:04:05' FROM seq_1_to_100",
+    "INSERT INTO Users SELECT seq, seq % 2, CONCAT('C', seq), seq % 16, NULL FROM seq_1_to_20000",
+    "INSERT INTO Gateways VALUES (1, 1, 'a'), (1, 2, 'b'), (2, 1, 'c')",
+    'INSERT INTO Types (ID, ' .. type_columns() .. ') VALUES (' .. table.concat(values, ', ') .. ')',
+    'INSERT INTO Types (ID) VALUES (3)')
+end
+
+local function setup_spaces()
+  box.schema.space.create('GlobalLocations', { if_not_exists = true })
+  box.space.GlobalLocations:create_index('ID', { if_not_exists = true, parts = { 1, 'unsigned' } })
+
+  box.schema.space.create('GlobalProfiles', { if_not_exists = true, format = {
+    { 'ID', 'unsigned' }, { 'Call', 'string' }, { 'Active', 'integer' },
+    { name = 'SSID', type = 'unsigned', is_nullable = true } } })
+  box.space.GlobalProfiles:create_index('ID', { if_not_exists = true, parts = { 1, 'unsigned' } })
+  box.space.GlobalProfiles:create_index('Call', { if_not_exists = true, unique = false, parts = { 2, 'string' } })
+
+  box.schema.space.create('GlobalGateways', { if_not_exists = true })
+  box.space.GlobalGateways:create_index('Gateway', { if_not_exists = true, parts = { 1, 'unsigned', 2, 'unsigned' } })
+
+  local format = { { 'ID', 'unsigned' } }
+  for _, item in ipairs(TYPES) do
+    table.insert(format, { name = item[1], type = 'any', is_nullable = true })
+  end
+  box.schema.space.create('Types', { if_not_exists = true, format = format })
+  box.space.Types:create_index('ID', { if_not_exists = true, parts = { 1, 'unsigned' } })
+end
+
+-- Replicator -----------------------------------------------------------------
+
+local journal = { reset = 0, insert = 0, update = 0, delete = 0 }
+local triggered = 0
+
+local function replicator(position)
+  local replica = mirrorflayer.new({
+    hosts = { 'mirrorflayer-nowhere:3306', HOST .. ':3306' },
+    user = 'replica', password = 'secret', server = 1001,
+    position = position or 'MirrorFlayer',
+    heartbeat = 1, retry = 1, batch = 500
+  })
+  replica:map('Registry', 'Locations', 'GlobalLocations', { 'ID', 'Node', 'Kind', 'Link', 'Slot', 'Modified' })
+  if position == nil then
+    replica:map('Registry', 'Locations', function (operation, old, new)
+      assert(box.is_in_txn(), 'function target outside of a transaction')
+      journal[operation] = journal[operation] + 1
+    end, { 'ID', 'Node' })
+    replica:map('Registry', 'Users', 'GlobalProfiles')
+    replica:map('Registry', 'Gateways', 'GlobalGateways', { 'BMC', 'TPC', 'Comment' })
+    replica:map('Registry', 'Types', 'Types')
+  end
+  box.space.GlobalLocations:on_replace(function ()
+    triggered = triggered + 1
+  end)
+  return replica:start()
+end
+
+local function caught_up(replica)
+  local target = sql:value('SELECT @@GLOBAL.gtid_binlog_pos')
+  wait(function ()
+    local stat = replica:stat()
+    if stat.status == 'failed' then
+      error('replicator failed: ' .. tostring(stat.error), 0)
+    end
+    return stat.position == target
+  end, 'position ' .. target)
+  return target
+end
+
+-- Checks ---------------------------------------------------------------------
+
+local function number(value)
+  if value == box.NULL then
+    return box.NULL
+  end
+  return tonumber(value)
+end
+
+local function locations_equal(what)
+  local _, rows = sql:query('SELECT ID, Node, Kind, Link, Slot, Modified FROM Registry.Locations ORDER BY ID')
+  local tuples = box.space.GlobalLocations:select({}, { iterator = 'ALL' })
+  if #rows ~= #tuples then
+    ok(false, '%s: Locations has %d rows, GlobalLocations %d', what, #rows, #tuples)
+    return
+  end
+  for index, row in ipairs(rows) do
+    local expected = { number(row[1]), number(row[2]), row[3], number(row[4]), number(row[5]), row[6] }
+    if encode(expected) ~= encode(tuples[index]) then
+      ok(false, '%s: row %s differs: %s vs %s', what, row[1], require('json').encode(expected), tostring(tuples[index]))
+      return
+    end
+  end
+  ok(true, '%s: GlobalLocations equals Locations (%d rows)', what, #rows)
+end
+
+local function check_types(id, what)
+  local tuple = box.space.Types:get(id)
+  if tuple == nil then
+    ok(false, '%s: Types row %d is missing', what, id)
+    return
+  end
+  local good = true
+  for index, item in ipairs(TYPES) do
+    if encode(tuple[index + 1]) ~= encode(item[4]) then
+      good = false
+      ok(false, '%s: Types %d.%s is %s (%s), expected %s', what, id, item[1],
+        tostring(tuple[index + 1]), type(tuple[index + 1]), tostring(item[4]))
+    end
+  end
+  ok(good, '%s: all %d typed values of row %d', what, #TYPES, id)
+end
+
+local function same_rows(left, right, what)
+  local first, second = box.space.Types:get(left), box.space.Types:get(right)
+  ok(first ~= nil and second ~= nil and encode(first:transform(1, 1)) == encode(second:transform(1, 1)),
+    '%s: Types rows %d and %d are identical', what, left, right)
+end
+
+local function stored_position(replica, key, target)
+  wait(function ()
+    local tuple = box.space[replica.config.position]:get(key)
+    return tuple ~= nil and tuple[2] == target
+  end, 'stored position ' .. target)
+  ok(true, 'stored position %s', target)
+end
+
+-- Phases ---------------------------------------------------------------------
+
+local function load()
+  setup_mariadb()
+  setup_spaces()
+  local replica = replicator()
+  local target = caught_up(replica)
+
+  ok(replica:stat().resyncs == 1, 'one full load')
+  locations_equal('load')
+  ok(box.space.GlobalProfiles:count() == 20000, 'GlobalProfiles has 20000 rows')
+  ok(encode(box.space.GlobalProfiles:get(5)) == encode({ 5, 'C5', 1, 5 }), 'GlobalProfiles columns follow the space format')
+  ok(box.space.GlobalGateways:count() == 3, 'GlobalGateways has 3 rows')
+  check_types(1, 'load')
+  local nulls = { 3 }
+  for index = 1, #TYPES do
+    nulls[index + 1] = box.NULL
+  end
+  ok(encode(box.space.Types:get(3)) == encode(box.tuple.new(nulls)), 'load: Types row 3 is all NULL')
+  ok(journal.reset == 1 and journal.insert == 100, 'function target: reset and 100 inserts (%d, %d)', journal.reset, journal.insert)
+  ok(triggered >= 100, 'on_replace triggers fired during the load (%d)', triggered)
+  stored_position(replica, 'mirrorflayer', target)
+
+  local inserts = journal.insert
+  triggered = 0
+  exec('USE Registry',
+    'INSERT INTO Locations (ID, Node, Kind, Link, Slot, Modified) ' ..
+      "SELECT seq, 3000, 'R', NULL, 1, '2026-05-06 07:08:09' FROM seq_101_to_110",
+    "UPDATE Locations SET Node = 4000, Kind = 'X' WHERE ID BETWEEN 20 AND 29",
+    'DELETE FROM Locations WHERE ID BETWEEN 30 AND 34',
+    'UPDATE Locations SET ID = 1005 WHERE ID = 5',
+    'START TRANSACTION',
+    "INSERT INTO Locations (ID, Node, Kind, Modified) VALUES (111, 1, 'T', '2026-07-07 07:07:07')",
+    "UPDATE Users SET `Call` = 'CHANGED', SSID = NULL WHERE ID = 7",
+    'DELETE FROM Users WHERE ID = 8',
+    'COMMIT',
+    'START TRANSACTION',
+    "INSERT INTO Locations (ID, Node, Kind) VALUES (999, 1, 'Z')",
+    'ROLLBACK',
+    "INSERT INTO Other (Value) VALUES ('unmapped')",
+    "UPDATE Gateways SET TPC = 3, Comment = 'moved' WHERE BMC = 1 AND TPC = 2",
+    'INSERT INTO Types (ID, ' .. type_columns() .. ') SELECT 2, ' .. type_columns() .. ' FROM Types WHERE ID = 1',
+    'INSERT INTO Types (ID) VALUES (4)',
+    'ALTER TABLE Locations ADD COLUMN Extra INT',
+    "INSERT INTO Locations (ID, Node, Kind, Modified, Extra) VALUES (112, 2, 'A', '2026-08-08 08:08:08', 5)")
+  target = caught_up(replica)
+
+  locations_equal('stream')
+  ok(box.space.GlobalLocations:get(5) == nil and box.space.GlobalLocations:get(1005) ~= nil, 'key change moved row 5 to 1005')
+  ok(box.space.GlobalLocations:get(999) == nil, 'rolled back insert is absent')
+  ok(encode(box.space.GlobalProfiles:get(7)) == encode({ 7, 'CHANGED', 1, box.NULL }), 'update in a multi-table transaction')
+  ok(box.space.GlobalProfiles:get(8) == nil and box.space.GlobalProfiles:count() == 19999, 'delete in a multi-table transaction')
+  ok(box.space.GlobalGateways:get({ 1, 2 }) == nil and box.space.GlobalGateways:get({ 1, 3 }) ~= nil, 'composite key change')
+  check_types(2, 'stream')
+  same_rows(1, 2, 'load vs stream')
+  same_rows(3, 4, 'load vs stream NULL')
+  ok(journal.insert - inserts == 12 and journal.update == 11 and journal.delete == 5,
+    'function target: %d inserts, %d updates, %d deletes', journal.insert - inserts, journal.update, journal.delete)
+  ok(triggered > 0, 'on_replace triggers fired during the stream (%d)', triggered)
+  stored_position(replica, 'mirrorflayer', target)
+  local stat = replica:stat()
+  ok(type(stat.lag) == 'number' and type(stat.event_time) == 'number' and stat.event_time > 0,
+    'stat: lag %s, event time %s', tostring(stat.lag), tostring(stat.event_time))
+  replica:stop()
+end
+
+local function resume()
+  setup_spaces()
+  exec('USE Registry',
+    "INSERT INTO Locations (ID, Node, Kind, Modified) SELECT seq, 5000, 'D', '2026-09-09 09:09:09' FROM seq_201_to_205",
+    'DELETE FROM Locations WHERE ID = 101',
+    'UPDATE Locations SET Node = 5555 WHERE ID = 102')
+  local replica = replicator()
+  caught_up(replica)
+  ok(replica:stat().resyncs == 0 and journal.reset == 0, 'continued from the stored GTID without a full load')
+  ok(journal.insert == 5 and journal.delete == 1 and journal.update == 1, 'only the changes made while down were applied')
+  locations_equal('resume')
+  exec("INSERT INTO Registry.Locations (ID, Node, Kind, Modified) VALUES (300, 6, 'S', '2026-10-10 10:10:10')")
+  local target = caught_up(replica)
+  locations_equal('resume stream')
+  stored_position(replica, 'mirrorflayer', target)
+  replica:stop()
+end
+
+local function purge()
+  setup_spaces()
+  exec('USE Registry',
+    'DELETE FROM Locations WHERE ID <= 10',
+    "INSERT INTO Locations (ID, Node, Kind, Modified) VALUES (400, 7, 'P', '2026-11-11 11:11:11')",
+    'FLUSH BINARY LOGS')
+  local file = sql:value('SHOW MASTER STATUS')
+  exec('PURGE BINARY LOGS TO ' .. protocol.literal(file))
+  local replica = replicator()
+  wait(function () return replica:stat().resyncs == 1 end, 'full reload after 1236')
+  local target = caught_up(replica)
+  ok(journal.reset == 1, 'function target got reset')
+  locations_equal('purge')
+  ok(box.space.GlobalLocations:get(1) == nil, 'rows deleted while down are removed by the reload')
+  ok(box.space.GlobalProfiles:count() == 19999, 'GlobalProfiles kept 19999 rows')
+  stored_position(replica, 'mirrorflayer', target)
+  replica:stop()
+end
+
+local function legacy()
+  box.schema.space.create('ReplicatorPositions', { if_not_exists = true })
+  box.space.ReplicatorPositions:create_index('ID', { if_not_exists = true, unique = true, parts = { 1, 'unsigned' } })
+  box.schema.space.create('GlobalLocations', { if_not_exists = true })
+  box.space.GlobalLocations:create_index('ID', { if_not_exists = true, parts = { 1, 'unsigned' } })
+  local state = sql:value('SELECT @@GLOBAL.gtid_binlog_pos')
+  box.space.ReplicatorPositions:replace({ 0, state, 0 })
+
+  local replica = replicator('ReplicatorPositions')
+  exec("INSERT INTO Registry.Locations (ID, Node, Kind, Modified) VALUES (600, 8, 'L', '2026-12-12 12:12:12')")
+  local target = caught_up(replica)
+  ok(replica:stat().resyncs == 0, 'continued from the Python position without a full load')
+  ok(box.space.GlobalLocations:count() == 1 and box.space.GlobalLocations:get(600) ~= nil,
+    'only the new row arrived (%d rows)', box.space.GlobalLocations:count())
+  stored_position(replica, 0, target)
+  ok(box.space.ReplicatorPositions:get(0)[3] > 0, 'event time stored next to the GTID')
+  replica:stop()
+end
+
+local phases = { load = load, resume = resume, purge = purge, legacy = legacy }
+
+local status, problem = pcall(phases[phase] or function () error('unknown phase ' .. tostring(phase), 0) end)
+if not status then
+  failures = failures + 1
+  log.error('FAIL: %s: %s', phase, tostring(problem))
+end
+sql:close()
+if failures > 0 then
+  log.error('phase %s: %d failures', phase, failures)
+  os.exit(1)
+end
+log.info('phase %s passed', phase)
+os.exit(0)
