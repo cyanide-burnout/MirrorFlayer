@@ -5,7 +5,7 @@ TLS       ?= 0
 HOST      ?=
 SSH       ?= ssh
 
-MODULES := $(wildcard mirrorflayer/*.lua)
+MODULES := $(wildcard Source/*.lua)
 
 ifneq ($(TLS),0)
 $(error TLS=1: mirrorflayer.tls is not implemented yet, build with TLS=0)
@@ -14,7 +14,7 @@ endif
 all:
 
 check:
-	@for file in $(MODULES) test/*.lua; do \
+	@for file in $(MODULES) Tests/*.lua; do \
 	  $(TARANTOOL) -e "assert(loadfile('$$file')) os.exit(0)" || exit 1; \
 	done
 	@echo checked
@@ -28,10 +28,10 @@ uninstall:
 
 # Docker test on this machine
 test:
-	test/run.sh
+	Tests/DockerTest.sh
 
 # Docker test on a remote Docker host
 remote-test:
-	SSH="$(SSH)" test/remote.sh $(HOST)
+	SSH="$(SSH)" Tests/RemoteTest.sh $(HOST)
 
 .PHONY: all check install uninstall test remote-test

@@ -1,12 +1,9 @@
 #!/usr/bin/env tarantool
--- Docker test of MirrorFlayer against MariaDB, driven by test/run.sh:
+-- Docker test of MirrorFlayer against MariaDB, driven by Tests/DockerTest.sh:
 --   load    full load, values of all types, INSERT/UPDATE/DELETE over the stream
 --   resume  restart continues from the stored GTID without a full load
 --   purge   the position is purged from the binlog: error 1236, full reload
 --   legacy  a fresh instance continues from the Python position [0, gtid, 0]
-
-local root = string.match(debug.getinfo(1, 'S').source, '^@(.*)/test/[^/]*$') or '.'
-package.path = root .. '/?.lua;' .. root .. '/?/init.lua;' .. package.path
 
 local ffi = require('ffi')
 local fiber = require('fiber')
