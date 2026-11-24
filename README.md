@@ -35,6 +35,7 @@ replica:map('Registry', 'Locations', 'GlobalLocations', { 'ID', 'Node', 'Kind', 
 replica:start()
 
 replica:stat()   -- status, position, lag, counters, last error
+replica:reload() -- restart with a full load over the spaces
 replica:stop()
 ```
 

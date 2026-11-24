@@ -575,6 +575,15 @@ function Replica:stop()
   self.status = 'stopped'
 end
 
+-- Reloads every table: restarts the replication with a full load, written
+-- over the spaces as usual, so they never go empty
+function Replica:reload()
+  check(self.fiber ~= nil, 'not started')
+  self.resync_needed = true
+  self:stop()
+  return self:start()
+end
+
 -- Returns the state: status, host, position (GTID state), event_time (source
 -- time of the last applied transaction), applied_time, lag (seconds between
 -- the two, 0 after a heartbeat), counters and the last error
