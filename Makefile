@@ -1,17 +1,27 @@
 PREFIX    ?= /usr
 LUADIR    ?= $(PREFIX)/share/tarantool
+CC        ?= cc
+CFLAGS    ?= -O2 -g
 TARANTOOL ?= tarantool
-TLS       ?= 0
+TLS       ?= 1
 HOST      ?=
 SSH       ?= ssh
 
+# MirrorFlayer.TLS (Source/TLS.so) is a C module: TLS over the connected socket and RSA for caching_sha2_password.
+# It needs the headers of tarantool-dev and libssl-dev; TLS=0 leaves it out, then only plain connections and
+# mysql_native_password (or caching_sha2_password from its cache) work
+
+MACHINE := $(shell $(CC) -dumpmachine)
+LIBDIR  ?= $(PREFIX)/lib/$(MACHINE)/tarantool
 MODULES := $(wildcard Source/*.lua)
+LIBRARY := $(if $(filter-out 0,$(TLS)),Source/TLS.so)
 
-ifneq ($(TLS),0)
-$(error TLS=1: MirrorFlayer.TLS is not implemented yet, build with TLS=0)
-endif
+override CFLAGS += -std=gnu99 -Wall -fPIC $(shell pkg-config --cflags tarantool 2>/dev/null || echo -I/usr/include/tarantool)
 
-all:
+all: $(LIBRARY)
+
+Source/TLS.so: Source/TLS.c
+	$(CC) $(CFLAGS) -shared $< $(LDFLAGS) -lssl -lcrypto -o $@
 
 check:
 	@for file in $(MODULES) Tests/*.lua; do \
@@ -19,12 +29,19 @@ check:
 	done
 	@echo checked
 
-install:
+install: all
 	install -d $(DESTDIR)$(LUADIR)/MirrorFlayer
 	install -m 644 $(MODULES) $(DESTDIR)$(LUADIR)/MirrorFlayer/
+ifneq ($(LIBRARY),)
+	install -d $(DESTDIR)$(LIBDIR)/MirrorFlayer
+	install -m 644 $(LIBRARY) $(DESTDIR)$(LIBDIR)/MirrorFlayer/
+endif
 
 uninstall:
-	rm -rf $(DESTDIR)$(LUADIR)/MirrorFlayer
+	rm -rf $(DESTDIR)$(LUADIR)/MirrorFlayer $(DESTDIR)$(LIBDIR)/MirrorFlayer
+
+clean:
+	rm -f Source/TLS.so
 
 # Docker test on this machine
 test:
@@ -34,4 +51,4 @@ test:
 remote-test:
 	SSH="$(SSH)" Tests/RemoteTest.sh $(HOST)
 
-.PHONY: all check install uninstall test remote-test
+.PHONY: all check install uninstall clean test remote-test
