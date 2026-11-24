@@ -15,8 +15,12 @@ local E = {
   QUERY = 2, STOP = 3, ROTATE = 4, FORMAT_DESCRIPTION = 15, XID = 16,
   TABLE_MAP = 19,
   WRITE_ROWS_V1 = 23, UPDATE_ROWS_V1 = 24, DELETE_ROWS_V1 = 25,
-  HEARTBEAT = 27,
+  HEARTBEAT = 27, ROWS_QUERY = 29,
   WRITE_ROWS_V2 = 30, UPDATE_ROWS_V2 = 31, DELETE_ROWS_V2 = 32,
+  -- MySQL
+  GTID_MYSQL = 33, ANONYMOUS_GTID = 34, PREVIOUS_GTIDS = 35, TRANSACTION_CONTEXT = 36,
+  VIEW_CHANGE = 37, XA_PREPARE = 38, PARTIAL_UPDATE_ROWS = 39, TRANSACTION_PAYLOAD = 40,
+  HEARTBEAT_V2 = 41, GTID_TAGGED = 42,
   -- MariaDB
   ANNOTATE_ROWS = 160, BINLOG_CHECKPOINT = 161, GTID = 162, GTID_LIST = 163,
   START_ENCRYPTION = 164, QUERY_COMPRESSED = 165,
@@ -78,7 +82,7 @@ local function event(packet, checksum)
     checksum = header.checksum == 1
   end
 
-  if checksum and header.type ~= E.HEARTBEAT then
+  if checksum and header.type ~= E.HEARTBEAT and header.type ~= E.HEARTBEAT_V2 then
     local stored = data.limit - 3
     data.position = stored
     stored = tobit(data:u32())

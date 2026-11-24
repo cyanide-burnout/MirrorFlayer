@@ -225,6 +225,162 @@ local function length_prefixed(data, size)
   return data:bytes(length)
 end
 
+-- MySQL binary JSON ------------------------------------------------------------
+
+-- The binlog of MySQL keeps JSON in its binary form; it is printed back the way
+-- the text protocol prints it: '{"a": 1, "b": [true, null]}', keys in the
+-- stored order, so the full load and the stream give the same string
+
+local J = {
+  SMALL_OBJECT = 0x0, LARGE_OBJECT = 0x1, SMALL_ARRAY = 0x2, LARGE_ARRAY = 0x3,
+  LITERAL = 0x4, INT16 = 0x5, UINT16 = 0x6, INT32 = 0x7, UINT32 = 0x8,
+  INT64 = 0x9, UINT64 = 0xa, DOUBLE = 0xb, STRING = 0xc, OPAQUE = 0xf
+}
+
+local LITERALS = { [0] = 'null', 'true', 'false' }
+
+local ESCAPES = {
+  ['"'] = '\\"', ['\\'] = '\\\\', ['\b'] = '\\b', ['\f'] = '\\f',
+  ['\n'] = '\\n', ['\r'] = '\\r', ['\t'] = '\\t'
+}
+
+local function quote(text)
+  return '"' .. string.gsub(text, '[%z\1-\31"\\]', function (symbol)
+    return ESCAPES[symbol] or format('\\u%04x', byte(symbol))
+  end) .. '"'
+end
+
+local function integer_text(value)
+  if type(value) == 'number' then
+    return format('%.0f', value)
+  end
+  return (string.gsub(tostring(value), 'U?LL$', ''))
+end
+
+-- Shortest text that reads back as the same double, exponents without '+'
+-- and leading zeros, integral values with '.0'
+local function double_text(value)
+  local text
+  for precision = 15, 17 do
+    text = format('%.' .. precision .. 'g', value)
+    if tonumber(text) == value then
+      break
+    end
+  end
+  text = string.gsub(text, 'e%+?(%-?)0*(%d)', 'e%1%2')
+  if string.find(text, '[%.eni]') == nil then
+    text = text .. '.0'
+  end
+  return text
+end
+
+local json_value
+
+local function json_varlen(data)
+  local value, shift = 0, 1
+  for _ = 1, 5 do
+    local octet = data:u8()
+    value = value + (octet % 0x80) * shift
+    if octet < 0x80 then
+      return value
+    end
+    shift = shift * 0x80
+  end
+  protocol.fatal('bad length in binary JSON')
+end
+
+-- A value entry of an object or array: inlined or at an offset from base
+local function json_entry(data, base, large)
+  local kind = data:u8()
+  local value
+  if kind == J.LITERAL then
+    value = large and data:u32() or data:u16()
+    return LITERALS[value] or 'null'
+  end
+  if kind == J.INT16 then
+    value = data:int(2)
+    if large then data:skip(2) end
+    return integer_text(value)
+  end
+  if kind == J.UINT16 then
+    value = data:u16()
+    if large then data:skip(2) end
+    return integer_text(value)
+  end
+  if large and kind == J.INT32 then
+    return integer_text(data:int(4))
+  end
+  if large and kind == J.UINT32 then
+    return integer_text(data:u32())
+  end
+  local offset = large and data:u32() or data:u16()
+  local saved  = data.position
+  data.position = base + offset
+  value = json_value(data, kind)
+  data.position = saved
+  return value
+end
+
+local function json_container(data, kind)
+  local base   = data.position
+  local large  = kind == J.LARGE_OBJECT or kind == J.LARGE_ARRAY
+  local object = kind == J.SMALL_OBJECT or kind == J.LARGE_OBJECT
+  local count  = large and data:u32() or data:u16()
+  local keys   = {}
+  local items  = {}
+  data:skip(large and 4 or 2) -- size
+  if object then
+    for index = 1, count do
+      local offset = large and data:u32() or data:u16()
+      local length = data:u16()
+      keys[index] = sub(data.data, base + offset, base + offset + length - 1)
+    end
+  end
+  for index = 1, count do
+    items[index] = json_entry(data, base, large)
+    if object then
+      items[index] = quote(keys[index]) .. ': ' .. items[index]
+    end
+  end
+  if object then
+    return '{' .. table.concat(items, ', ') .. '}'
+  end
+  return '[' .. table.concat(items, ', ') .. ']'
+end
+
+json_value = function (data, kind)
+  if kind <= J.LARGE_ARRAY then
+    return json_container(data, kind)
+  elseif kind == J.LITERAL then
+    return LITERALS[data:u8()] or 'null'
+  elseif kind == J.INT16 then
+    return integer_text(data:int(2))
+  elseif kind == J.UINT16 then
+    return integer_text(data:u16())
+  elseif kind == J.INT32 then
+    return integer_text(data:int(4))
+  elseif kind == J.UINT32 then
+    return integer_text(data:u32())
+  elseif kind == J.INT64 then
+    return integer_text(data:i64())
+  elseif kind == J.UINT64 then
+    return integer_text(data:u64())
+  elseif kind == J.DOUBLE then
+    return double_text(data:double())
+  elseif kind == J.STRING then
+    return quote(data:bytes(json_varlen(data)))
+  end
+  protocol.fatal('binary JSON value of type %d (opaque: DECIMAL, dates inside JSON) is not supported', kind)
+end
+
+local function json(raw)
+  if #raw == 0 then
+    return 'null'
+  end
+  local data = protocol.reader(raw)
+  return json_value(data, data:u8())
+end
+
 local function finish(column, value)
   if column.kind == 'bytes' then
     return binary(value)
@@ -324,6 +480,8 @@ local function decode(data, column, type, info)
       return enumeration(column, value)
     end
     return finish(column, length_prefixed(data, length > 255 and 2 or 1))
+  elseif type == T.JSON then
+    return json(length_prefixed(data, info))
   elseif type == T.NULL then
     return NULL
   end

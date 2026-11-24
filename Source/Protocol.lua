@@ -241,6 +241,10 @@ local function u32(value)
     math.floor(value / 0x10000) % 0x100, math.floor(value / 0x1000000) % 0x100)
 end
 
+local function u64(value)
+  return u32(value % 0x100000000) .. u32(math.floor(value / 0x100000000))
+end
+
 local function lenenc(value)
   if value < 0xfb then
     return char(value)
@@ -269,34 +273,34 @@ end
 
 -- Authentication -------------------------------------------------------------
 
+-- XOR of left with right, right repeated as needed
 local function xor(left, right)
   local result = {}
+  local size   = #right
   for index = 1, #left do
-    result[index] = char(bxor(byte(left, index), byte(right, index)))
+    result[index] = char(bxor(byte(left, index), byte(right, (index - 1) % size + 1)))
   end
   return table.concat(result)
 end
 
--- SHA1(password) XOR SHA1(scramble + SHA1(SHA1(password)))
+-- mysql_native_password: SHA1(password) XOR SHA1(scramble + SHA1(SHA1(password)))
 local function native(password, scramble)
   local first
   if password == '' then
     return ''
   end
   first = digest.sha1(password)
-  return xor(first, digest.sha1(sub(scramble, 1, 20) .. digest.sha1(first)))
+  return xor(first, digest.sha1(scramble .. digest.sha1(first)))
 end
 
-local plugins = {
-  mysql_native_password = native
-}
-
-local function authenticate(plugin, password, scramble)
-  local method = plugins[plugin]
-  if method == nil then
-    fatal('authentication plugin %s is not supported', plugin)
+-- caching_sha2_password: SHA256(password) XOR SHA256(SHA256(SHA256(password)) + scramble)
+local function sha2(password, scramble)
+  local first
+  if password == '' then
+    return ''
   end
-  return method(password, scramble)
+  first = digest.sha256(password)
+  return xor(first, digest.sha256(digest.sha256(first) .. scramble))
 end
 
 -- Connection -----------------------------------------------------------------
@@ -348,8 +352,67 @@ function Connection:command(payload)
   self:write_packet(payload)
 end
 
--- Greeting and HandshakeResponse41, then the authentication exchange
-function Connection:handshake(user, password, database)
+-- Password for the full authentication of caching_sha2_password and
+-- sha256_password without TLS: RSA-OAEP with the public key of the server
+function Connection:encrypt(pem)
+  local status, TLS = pcall(require, 'MirrorFlayer.TLS')
+  if not status then
+    fatal('%s without TLS needs MirrorFlayer.TLS (TLS.so) for RSA: %s', self.plugin, tostring(TLS))
+  end
+  return TLS.encrypt(pem, xor(self.password .. '\0', self.scramble))
+end
+
+-- First answer of an authentication plugin to the scramble
+function Connection:respond()
+  local plugin, password = self.plugin, self.password
+  if plugin == 'mysql_native_password' then
+    return native(password, self.scramble)
+  end
+  if plugin == 'caching_sha2_password' then
+    return sha2(password, self.scramble)
+  end
+  if plugin == 'sha256_password' then
+    if password == '' then
+      return ''
+    end
+    if self.secure then
+      return password .. '\0'
+    end
+    if self.public_key ~= nil then
+      return self:encrypt(self.public_key)
+    end
+    return '\1' -- asks for the public key
+  end
+  fatal('authentication plugin %s is not supported', plugin)
+end
+
+-- AuthMoreData (0x01) of caching_sha2_password and sha256_password
+function Connection:more(data)
+  if self.plugin == 'caching_sha2_password' then
+    if data == '\3' then
+      return -- the server has the password cached, OK follows
+    end
+    if data == '\4' then -- full authentication
+      if self.secure then
+        self:write_packet(self.password .. '\0')
+      elseif self.public_key ~= nil then
+        self:write_packet(self:encrypt(self.public_key))
+      else
+        self:write_packet('\2') -- asks for the public key
+      end
+      return
+    end
+  end
+  if self.plugin == 'caching_sha2_password' or self.plugin == 'sha256_password' then
+    self:write_packet(self:encrypt(data)) -- the public key in PEM
+    return
+  end
+  fatal('unexpected authentication data for %s', self.plugin)
+end
+
+-- Greeting, SSL Request and TLS when asked, HandshakeResponse41, then the
+-- authentication exchange
+function Connection:handshake(user, database)
   local packet = self:read_packet()
   local data, capabilities, length, scramble, plugin, flags, response
 
@@ -363,8 +426,8 @@ function Connection:handshake(user, password, database)
   end
   self.version = data:cstring()
   self.mariadb = string.find(self.version, 'MariaDB', 1, true) ~= nil
-  self.id = data:u32()
-  scramble = data:bytes(8)
+  self.id      = data:u32()
+  scramble     = data:bytes(8)
   data:skip(1)
   capabilities = data:u16()
   if data:left() > 0 then
@@ -379,8 +442,8 @@ function Connection:handshake(user, password, database)
       plugin = data:cstring()
     end
   end
-  scramble = sub(scramble, 1, 20)
-  plugin = plugin or 'mysql_native_password'
+  self.scramble     = sub(scramble, 1, 20)
+  self.plugin       = plugin or 'mysql_native_password'
   self.capabilities = capabilities
 
   if band(capabilities, CLIENT_PROTOCOL_41) == 0 then
@@ -395,7 +458,17 @@ function Connection:handshake(user, password, database)
   end
   flags = band(flags, bor(capabilities, CLIENT_PROTOCOL_41))
 
-  response = authenticate(plugin, password, scramble)
+  if self.tls ~= nil then
+    if band(capabilities, CLIENT_SSL) == 0 then
+      fatal('server %s does not support TLS', self.version)
+    end
+    flags = bor(flags, CLIENT_SSL)
+    self:write_packet(u32(flags) .. u32(0x1000000) .. char(CHARSET_UTF8MB4_GENERAL_CI) .. string.rep('\0', 23))
+    self.stream:secure(self.tls)
+    self.secure = true
+  end
+
+  response = self:respond()
   if band(flags, CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA) ~= 0 then
     response = lenenc(#response) .. response
   else
@@ -406,28 +479,32 @@ function Connection:handshake(user, password, database)
     u32(flags), u32(0x1000000), char(CHARSET_UTF8MB4_GENERAL_CI), string.rep('\0', 23),
     user, '\0', response,
     database ~= nil and database .. '\0' or '',
-    band(flags, CLIENT_PLUGIN_AUTH) ~= 0 and plugin .. '\0' or ''
+    band(flags, CLIENT_PLUGIN_AUTH) ~= 0 and self.plugin .. '\0' or ''
   }))
 
   while true do
     packet = self:read_packet()
     local first = byte(packet, 1)
     if first == 0x00 then
+      self.password = nil
       return
     end
     if first == 0xff then
       error(server_error(packet), 0)
     end
     if first == 0xfe then -- AuthSwitchRequest
-      data = reader(packet, 2)
-      plugin = data:cstring()
-      scramble = data:rest()
+      data        = reader(packet, 2)
+      self.plugin = data:cstring()
+      scramble    = data:rest()
       if byte(scramble, #scramble) == 0 then
         scramble = sub(scramble, 1, -2)
       end
-      self:write_packet(authenticate(plugin, password, scramble))
+      self.scramble = scramble
+      self:write_packet(self:respond())
+    elseif first == 0x01 then -- AuthMoreData
+      self:more(sub(packet, 2))
     else
-      fatal('unexpected packet 0x%02x during authentication with %s', first, plugin)
+      fatal('unexpected packet 0x%02x during authentication with %s', first, self.plugin)
     end
   end
 end
@@ -530,14 +607,21 @@ function Connection:close()
 end
 
 -- Opens a connection and authenticates.
--- options: host, port, user, password, database, timeout, tls
+-- options: host, port, user, password, database, timeout,
+-- tls (nil or { verify, ca, cert, key }), public_key (PEM of the server for
+-- caching_sha2_password and sha256_password without TLS)
 local function connect(options)
-  local connection = setmetatable({ sequence = 0 }, Connection)
-  if options.tls then
-    fatal('TLS is not implemented yet')
+  local connection = setmetatable({
+    sequence   = 0,
+    password   = options.password or '',
+    tls        = options.tls or nil,
+    public_key = options.public_key
+  }, Connection)
+  if connection.tls == true then
+    connection.tls = { verify = 'none' }
   end
   connection.stream = transport.connect(options.host, options.port, options.timeout)
-  local status, problem = pcall(connection.handshake, connection, options.user, options.password or '', options.database)
+  local status, problem = pcall(connection.handshake, connection, options.user, options.database)
   if not status then
     connection.stream:close()
     connection.stream = nil
@@ -558,5 +642,6 @@ return {
   identifier = identifier,
   u16 = u16,
   u32 = u32,
+  u64 = u64,
   lenenc = lenenc
 }

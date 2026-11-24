@@ -17,6 +17,7 @@ local protocol = require('MirrorFlayer.Protocol')
 local column   = require('MirrorFlayer.Column')
 local binlog   = require('MirrorFlayer.BinLog')
 local mariadb  = require('MirrorFlayer.MariaDB')
+local mysql    = require('MirrorFlayer.MySQL')
 local store    = require('MirrorFlayer.Store')
 
 local E = binlog.E
@@ -33,10 +34,18 @@ local DEFAULTS = {
   retry = 5
 }
 
-local COMPRESSED = {
-  [E.QUERY_COMPRESSED] = true,
-  [E.WRITE_ROWS_COMPRESSED_V1] = true, [E.UPDATE_ROWS_COMPRESSED_V1] = true, [E.DELETE_ROWS_COMPRESSED_V1] = true,
-  [E.WRITE_ROWS_COMPRESSED] = true, [E.UPDATE_ROWS_COMPRESSED] = true, [E.DELETE_ROWS_COMPRESSED] = true
+local COMPRESSED = 'compressed binlog events are not supported, turn log_bin_compress off'
+
+-- Events that stop the replicator
+local UNSUPPORTED = {
+  [E.QUERY_COMPRESSED] = COMPRESSED,
+  [E.WRITE_ROWS_COMPRESSED_V1] = COMPRESSED, [E.UPDATE_ROWS_COMPRESSED_V1] = COMPRESSED, [E.DELETE_ROWS_COMPRESSED_V1] = COMPRESSED,
+  [E.WRITE_ROWS_COMPRESSED] = COMPRESSED, [E.UPDATE_ROWS_COMPRESSED] = COMPRESSED, [E.DELETE_ROWS_COMPRESSED] = COMPRESSED,
+  [E.ANONYMOUS_GTID] = 'transaction without GTID: the source needs gtid_mode=ON',
+  [E.GTID_TAGGED] = 'tagged GTIDs are not supported',
+  [E.TRANSACTION_PAYLOAD] = 'compressed transactions are not supported, turn binlog_transaction_compression off',
+  [E.PARTIAL_UPDATE_ROWS] = 'partial JSON updates are not supported, binlog_row_value_options must be empty',
+  [E.XA_PREPARE] = 'XA transactions are not supported'
 }
 
 local Replica = {}
@@ -61,7 +70,9 @@ end
 
 -- Creates a replicator.
 -- config: hosts (array of 'host[:port]'), user, password, server (replica
--- server id), tls (false), position (space name), key (of the position, the
+-- server id), tls (false, true or { verify = 'none' | 'ca' | 'identity', ca,
+-- cert, key }), public_key (PEM of the source for caching_sha2_password
+-- without TLS, asked from the server when missing), position (space name), key (of the position, the
 -- server id by default), name (in logs and metrics), heartbeat (seconds),
 -- timeout (seconds), batch (rows per transaction of the full load), retry
 -- (seconds between connection attempts)
@@ -80,6 +91,22 @@ local function new(config)
   end
   check(type(options.position) == 'string', 'config.position must be a space name')
   check(type(options.name) == 'string', 'config.name must be a string')
+  if options.tls == true then
+    options.tls = { verify = 'none' }
+  elseif type(options.tls) == 'table' then
+    local tls = {}
+    for key, value in pairs(options.tls) do
+      tls[key] = value
+    end
+    tls.verify = tls.verify or (tls.ca ~= nil and 'ca' or 'none')
+    check(tls.verify == 'none' or tls.verify == 'ca' or tls.verify == 'identity',
+      "config.tls.verify must be 'none', 'ca' or 'identity'")
+    options.tls = tls
+  else
+    check(not options.tls, 'config.tls must be a boolean or a table')
+    options.tls = nil
+  end
+  check(options.public_key == nil or type(options.public_key) == 'string', 'config.public_key must be a PEM string')
   if options.key == nil then
     options.key = options.server
   end
@@ -127,7 +154,8 @@ function Replica:connect(host, port)
     user = self.config.user,
     password = self.config.password,
     timeout = self.config.timeout,
-    tls = self.config.tls
+    tls = self.config.tls,
+    public_key = self.config.public_key
   })
   local status, problem = pcall(connection.query, connection, "SET time_zone = '+00:00'")
   if not status then
@@ -171,7 +199,7 @@ end
 -- Remembers the binlog position first, then loads every table; changes made
 -- meanwhile come again from the binlog and applying them is idempotent
 function Replica:resync(connection)
-  local state   = mariadb.position(connection)
+  local state   = self.dialect.position(connection)
   local started = clock.time()
   self.status = 'loading'
   self:say('info', 'full load at GTID %s', state)
@@ -227,8 +255,8 @@ function Replica:commit(header)
   if transaction == nil then
     return
   end
-  self.state[transaction.domain] = transaction.gtid
-  local state = mariadb.format(self.state)
+  self.dialect.add(self.state, transaction)
+  local state = self.dialect.format(self.state)
   local stats = self.stats
   stats.position = state
   stats.event_time = header.timestamp
@@ -278,12 +306,12 @@ function Replica:event(packet)
 
   if type == E.FORMAT_DESCRIPTION then
     self.checksum = header.checksum == 1
-  elseif type == E.HEARTBEAT then
+  elseif type == E.HEARTBEAT or type == E.HEARTBEAT_V2 then
     self.stats.heartbeat_time = clock.time()
     self.stats.lag = 0
     self:flush()
-  elseif type == E.GTID then
-    local gtid = mariadb.gtid(header)
+  elseif type == E.GTID or type == E.GTID_MYSQL then
+    local gtid = self.dialect.gtid(header)
     if self.transaction ~= nil then
       self:say('warn', 'transaction %s has no end, dropped', self.transaction.gtid)
     end
@@ -329,6 +357,9 @@ function Replica:event(packet)
     local query = binlog.query(header)
     local text  = statement(query.query)
     if text == 'BEGIN' then
+      if self.transaction ~= nil then
+        self.transaction.standalone = false
+      end
       return
     end
     if text == 'COMMIT' then
@@ -353,20 +384,19 @@ function Replica:event(packet)
       end
       self:commit(header)
     end
-  elseif COMPRESSED[type] then
-    fatal('compressed binlog events are not supported, turn log_bin_compress off')
+  elseif UNSUPPORTED[type] ~= nil then
+    fatal('%s', UNSUPPORTED[type])
   end
-  -- ROTATE, GTID_LIST, BINLOG_CHECKPOINT, ANNOTATE_ROWS, STOP need nothing
+  -- ROTATE, STOP, GTID_LIST, BINLOG_CHECKPOINT, ANNOTATE_ROWS, ROWS_QUERY,
+  -- PREVIOUS_GTIDS, TRANSACTION_CONTEXT, VIEW_CHANGE need nothing
 end
 
 function Replica:session(host, port)
   local connection = self:connect(host, port)
   self.connection = connection
   self.host, self.port = host, port
-  self:say('info', 'connected to %s:%d, %s', host, port, connection.version)
-  if not connection.mariadb then
-    fatal('%s is not MariaDB; MySQL is not supported yet', connection.version)
-  end
+  self.dialect = connection.mariadb and mariadb or mysql
+  self:say('info', 'connected to %s:%d, %s%s', host, port, connection.version, connection.secure and ', TLS' or '')
 
   for _, source in ipairs(self.order) do
     describe(connection, source)
@@ -376,13 +406,13 @@ function Replica:session(host, port)
   if state == nil or self.resync_needed then
     state = self:resync(connection)
   end
-  self.state = mariadb.parse(state)
+  self.state = self.dialect.parse(state)
   self.stats.position = state
   self.maps = {}
   self.transaction = nil
   self.dirty = false
 
-  self.checksum = mariadb.request(connection, {
+  self.checksum = self.dialect.request(connection, {
     state = state,
     server = self.config.server,
     heartbeat = self.config.heartbeat

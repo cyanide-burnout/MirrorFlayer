@@ -54,6 +54,11 @@ local function digits(value)
   return (string.gsub(tostring(value), 'U?LL$', ''))
 end
 
+-- Puts the GTID of a finished transaction into the state
+local function add(state, transaction)
+  state[transaction.domain] = transaction.gtid
+end
+
 -- GTID_EVENT: { domain, gtid, standalone }
 local function gtid(header)
   local data     = header.data
@@ -83,6 +88,7 @@ local function request(connection, options)
 end
 
 return {
+  add = add,
   position = position,
   parse = parse,
   format = format,
