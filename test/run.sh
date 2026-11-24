@@ -1,7 +1,8 @@
 #!/bin/sh
 # Docker test: MariaDB with a row-based binlog and Tarantool 3 running
 # test/scenario.lua in phases. Containers are named mirrorflayer-* and
-# removed afterwards, the work directory too.
+# removed afterwards, the work directory too. The TT_* variables of the
+# official image switch Tarantool to its cluster config, so they are unset.
 set -eu
 
 cd "$(dirname "$0")/.."
@@ -46,7 +47,8 @@ phase() {
   docker run --rm --name "$TARANTOOL" --network "$NETWORK" \
     --user "$(id -u):$(id -g)" -e HOME=/tmp -e MIRRORFLAYER_DATA=/data \
     -v "$SOURCE:/src:ro" -v "$WORK/$2:/data" -w /src \
-    --entrypoint tarantool "$TARANTOOL_IMAGE" test/scenario.lua "$1"
+    --entrypoint env "$TARANTOOL_IMAGE" -u TT_APP_NAME -u TT_INSTANCE_NAME \
+    tarantool test/scenario.lua "$1"
 }
 
 docker run --rm --entrypoint tarantool "$TARANTOOL_IMAGE" --version | head -1

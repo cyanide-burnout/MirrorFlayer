@@ -343,8 +343,14 @@ local function purge()
     'DELETE FROM Locations WHERE ID <= 10',
     "INSERT INTO Locations (ID, Node, Kind, Modified) VALUES (400, 7, 'P', '2026-11-11 11:11:11')",
     'FLUSH BINARY LOGS')
+  -- A file is purged only after its binlog checkpoint, which comes later
   local file = sql:value('SHOW MASTER STATUS')
-  exec('PURGE BINARY LOGS TO ' .. protocol.literal(file))
+  wait(function ()
+    exec('PURGE BINARY LOGS TO ' .. protocol.literal(file))
+    local _, logs = sql:query('SHOW BINARY LOGS')
+    return #logs == 1
+  end, 'binlog purge')
+  ok(true, 'binlogs before %s purged', file)
   local replica = replicator()
   wait(function () return replica:stat().resyncs == 1 end, 'full reload after 1236')
   local target = caught_up(replica)

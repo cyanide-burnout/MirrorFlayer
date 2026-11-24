@@ -1,6 +1,6 @@
 #!/bin/sh
 # Copies the working tree to a Docker host and runs test/run.sh there:
-#   test/remote.sh [host]    (SSH overrides the ssh command)
+#   test/remote.sh [host]    (SSH overrides the ssh command, MARIADB_IMAGE the server)
 set -eu
 
 HOST=${1:?usage: $0 host}
@@ -9,8 +9,8 @@ REMOTE=mirrorflayer-test
 
 cd "$(dirname "$0")/.."
 $SSH "$HOST" "rm -rf $REMOTE/src && mkdir -p $REMOTE/src"
-COPYFILE_DISABLE=1 tar --exclude=.git --exclude=.work -cf - . | $SSH "$HOST" "tar -xf - -C $REMOTE/src"
+COPYFILE_DISABLE=1 tar --no-xattrs --exclude=.git --exclude=.work -cf - . | $SSH "$HOST" "tar -xf - -C $REMOTE/src"
 status=0
-$SSH "$HOST" "cd $REMOTE/src && WORK=\$HOME/$REMOTE/work sh test/run.sh" || status=$?
+$SSH "$HOST" "cd $REMOTE/src && MARIADB_IMAGE=${MARIADB_IMAGE:-mariadb:11.4} WORK=\$HOME/$REMOTE/work sh test/run.sh" || status=$?
 $SSH "$HOST" "rm -rf $REMOTE"
 exit $status

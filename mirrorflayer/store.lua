@@ -154,9 +154,16 @@ local function load(targets, batch)
   return self
 end
 
+local function trace(problem)
+  if type(problem) == 'table' then
+    return problem
+  end
+  return debug.traceback(tostring(problem), 2)
+end
+
 local function transaction(action)
   box.begin()
-  local status, problem = pcall(action)
+  local status, problem = xpcall(action, trace)
   if not status then
     box.rollback()
     error(problem, 0)

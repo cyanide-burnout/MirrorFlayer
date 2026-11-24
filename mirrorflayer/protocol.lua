@@ -111,11 +111,12 @@ function Reader:u48()
   return low + self:u16() * 0x100000000
 end
 
--- Integers above 2^53 come as uint64_t / int64_t cdata, the rest as numbers
+-- Integers above 2^53 come as uint64_t / int64_t cdata, the rest as numbers.
+-- The pointers are not const: msgpack refuses const-qualified cdata.
 function Reader:u64()
   local value
   self:check(8)
-  value = ffi.cast('const uint64_t *', self.pointer + self.position - 1)[0]
+  value = ffi.cast('uint64_t *', self.pointer + self.position - 1)[0]
   self.position = self.position + 8
   if value < 0x20000000000000ULL then
     return tonumber(value)
@@ -126,7 +127,7 @@ end
 function Reader:i64()
   local value
   self:check(8)
-  value = ffi.cast('const int64_t *', self.pointer + self.position - 1)[0]
+  value = ffi.cast('int64_t *', self.pointer + self.position - 1)[0]
   self.position = self.position + 8
   if value < 0x20000000000000LL and value > -0x20000000000000LL then
     return tonumber(value)
@@ -255,7 +256,7 @@ end
 
 -- Quotes a string literal for SQL
 local function literal(value)
-  return "'" .. string.gsub(value, "[\0\n\r\\'\"\026]", {
+  return "'" .. string.gsub(value, "[%z\n\r\\'\"\026]", {
     ['\0'] = '\\0', ['\n'] = '\\n', ['\r'] = '\\r', ['\\'] = '\\\\',
     ["'"] = "\\'", ['"'] = '\\"', ['\026'] = '\\Z'
   }) .. "'"

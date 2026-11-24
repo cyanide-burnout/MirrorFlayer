@@ -401,12 +401,20 @@ function Replica:session(host, port)
   end
 end
 
+-- Keeps failure objects, adds the stack to unexpected errors
+local function trace(problem)
+  if type(problem) == 'table' then
+    return problem
+  end
+  return debug.traceback(tostring(problem), 2)
+end
+
 local function loop(self)
   local hosts = self.config.hosts
   local index = 1
   while not self.stopping do
     local host, port = address(hosts[index])
-    local status, problem = pcall(self.session, self, host, port)
+    local status, problem = xpcall(self.session, trace, self, host, port)
     if self.connection ~= nil then
       self.connection:close()
       self.connection = nil
