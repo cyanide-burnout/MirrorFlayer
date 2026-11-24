@@ -52,7 +52,7 @@ Configuration is Lua only.
 | `name`      | `'MirrorFlayer'` | Name in logs and the label of metrics |
 | `heartbeat` | `10`           | Seconds between heartbeats of an idle source; no data for three periods reconnects |
 | `timeout`   | `30`           | Connect and query timeout, seconds |
-| `batch`     | `1000`         | Rows per transaction during a full load |
+| `batch`     | `100`          | Statements per transaction during a full load; the fiber yields after each |
 | `retry`     | `5`            | Seconds between connection attempts |
 
 ### Mapping
@@ -65,7 +65,13 @@ Configuration is Lua only.
 * The key is the primary index of the space; there is no `key_fields`.
 * One table may go to several targets (call `map` several times).
 * Spaces are written with ordinary `replace`/`delete`, so `on_replace`
-  triggers keep working.
+  triggers keep working. A full load writes only rows that differ from the
+  stored tuples, at most `batch` per transaction, and yields after each, so
+  triggers that put to channels do not find them full. If a trigger yields
+  anyway, Tarantool aborts the transaction; MirrorFlayer repeats it in smaller
+  pieces after a pause and slows down for a minute (`stat().aborts`). A
+  binlog transaction split that way is no longer atomic (`stat().split`);
+  applying is idempotent, so a crash in between only repeats statements.
 
 A function target receives `'insert' | 'update' | 'delete'` with the old and
 new tuples (Lua arrays in `columns` order, `nil` where absent), and `'reset'`

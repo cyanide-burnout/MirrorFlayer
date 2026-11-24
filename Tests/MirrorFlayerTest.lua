@@ -321,6 +321,7 @@ local function load()
   ok(encode(box.space.Types:get(3)) == encode(box.tuple.new(nulls)), 'load: Types row 3 is all NULL')
   ok(journal.reset == 1 and journal.insert == 100, 'function target: reset and 100 inserts (%d, %d)', journal.reset, journal.insert)
   ok(profiled >= 20000, 'a yielding trigger did not stop the load (%d calls)', profiled)
+  ok(replica:stat().aborts <= 20, 'the pace kept aborts by the trigger few (%d)', replica:stat().aborts)
   ok(triggered >= 100, 'on_replace triggers fired during the load (%d)', triggered)
   stored_position(replica, KEY, target)
 

@@ -157,45 +157,81 @@ local function yielded(problem)
   return type(problem) == 'cdata' and problem.code == YIELD
 end
 
--- Runs perform(statement) for every statement and then final() in one
--- transaction. When a trigger yields and aborts it, runs each statement in a
--- transaction of its own, repeating it after a pause until its triggers pass
--- (applying is idempotent), and final() last. Returns true when atomic.
+-- Pace of writes. The fiber yields after every transaction of at most batch
+-- statements, so fibers reading the channels that triggers write to keep up.
+-- A transaction a yielding trigger aborts nevertheless halves the statements
+-- per transaction and turns on a pause between transactions until the
+-- channels drain; after a minute without aborts the pace is back to batch.
+-- A storm of aborts is avoided on purpose: Tarantool 3.9 was seen to crash in
+-- the allocator after a series of them.
+local CALM  = 60
+local PAUSE = 0.01
+
+local pace = { limit = 100, ceiling = 100, size = 100, pause = 0, streak = 0, calm = 0, aborts = 0 }
+
+local function configure(batch)
+  pace.limit   = batch
+  pace.ceiling = batch
+  pace.size    = batch
+  pace.pause   = 0
+end
+
+local function aborted(count)
+  pace.aborts  = pace.aborts + 1
+  pace.ceiling = math.max(1, math.floor(count / 2))
+  pace.size    = pace.ceiling
+  pace.pause   = math.min(math.max(pace.pause * 2, PAUSE), 0.5)
+  pace.streak  = 0
+  pace.calm    = fiber.clock() + CALM
+  log.warn('MirrorFlayer: a trigger yielded, %d statements per transaction with %.2f s pauses', pace.size, pace.pause)
+end
+
+local function succeeded()
+  if pace.ceiling < pace.limit and fiber.clock() > pace.calm then
+    pace.ceiling = pace.limit
+    pace.pause   = 0
+  end
+  pace.streak = pace.streak + 1
+  if pace.streak >= 10 and pace.size < pace.ceiling then
+    pace.size   = math.min(pace.ceiling, pace.size * 2)
+    pace.streak = 0
+  end
+end
+
+-- Runs perform(statement) for every statement and then final(), in
+-- transactions of at most pace.size statements, final() in the last one.
+-- A transaction a trigger aborts is repeated smaller after a pause (applying
+-- is idempotent). Returns true when everything went in one transaction.
 local function apply(statements, perform, final)
-  local status, problem = pcall(transaction, function ()
-    for _, statement in ipairs(statements) do
-      perform(statement)
-    end
-    if final ~= nil then
-      final()
-    end
-  end)
-  if status then
-    return true
-  end
-  if not yielded(problem) then
-    error(problem, 0)
-  end
-  for _, statement in ipairs(statements) do
-    local delay = 0.001
-    while true do
-      local done, failure = pcall(transaction, function ()
-        perform(statement)
-      end)
-      if done then
-        break
+  local count  = #statements
+  local first  = 1
+  local chunks = 0
+  repeat
+    local last = math.min(count, first + pace.size - 1)
+    local status, problem = pcall(transaction, function ()
+      for index = first, last do
+        perform(statements[index])
       end
-      if not yielded(failure) then
-        error(failure, 0)
+      if last == count and final ~= nil then
+        final()
       end
-      fiber.sleep(delay)
-      delay = math.min(delay * 2, 0.1)
+    end)
+    if status then
+      chunks = chunks + 1
+      first  = last + 1
+      succeeded()
+    elseif yielded(problem) then
+      aborted(last - first + 1)
+    else
+      error(problem, 0)
     end
-  end
-  if final ~= nil then
-    transaction(final)
-  end
-  return false
+    if pace.pause > 0 then
+      fiber.sleep(pace.pause)
+    else
+      fiber.yield()
+    end
+  until first > count
+  return chunks == 1
 end
 
 -- Full load ------------------------------------------------------------------
@@ -244,9 +280,7 @@ function Load:flush()
     return
   end
   self.pending = {}
-  if not apply(rows, function (row) self:write(row) end) then
-    self.split = true
-  end
+  apply(rows, function (row) self:write(row) end)
   fiber.yield()
 end
 
@@ -362,5 +396,7 @@ return {
   load = load,
   transaction = transaction,
   apply = apply,
+  configure = configure,
+  aborts = function () return pace.aborts end,
   position = position
 }

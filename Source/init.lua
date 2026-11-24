@@ -30,7 +30,7 @@ local DEFAULTS = {
   tls = false,
   heartbeat = 10,
   timeout = 30,
-  batch = 1000,
+  batch = 100,
   retry = 5
 }
 
@@ -205,6 +205,7 @@ function Replica:resync(connection)
   self:say('info', 'full load at GTID %s', state)
   for _, source in ipairs(self.order) do
     local loader = store.load(source.targets, self.config.batch)
+    local aborts = store.aborts()
     local names  = {}
     for index, item in ipairs(source.columns) do
       names[index] = protocol.identifier(item.name)
@@ -221,8 +222,8 @@ function Replica:resync(connection)
         count = count + 1
       end)
     local deleted = loader:finish()
-    self:say('info', '%s: %d rows loaded, %d written, %d stale rows deleted%s', source.id, count,
-      loader.written, deleted, loader.split and ', triggers yielded' or '')
+    self:say('info', '%s: %d rows loaded, %d written, %d stale rows deleted, %d aborted by triggers', source.id,
+      count, loader.written, deleted, store.aborts() - aborts)
   end
   store.transaction(function ()
     self.position:put(state, clock.time())
@@ -545,6 +546,7 @@ function Replica:start()
   end
   self.stopping = false
   self.status = 'starting'
+  store.configure(self.config.batch)
   self:register()
   self.fiber = fiber.new(loop, self)
   self.fiber:name('MirrorFlayer:' .. self.config.name, { truncate = true })
@@ -585,6 +587,7 @@ function Replica:stat()
     resyncs = stats.resyncs,
     tls = stats.tls,
     split = stats.split,
+    aborts = store.aborts(),
     error = stats.error
   }
 end
