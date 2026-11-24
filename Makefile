@@ -49,6 +49,7 @@ test:
 
 # Docker test on a remote Docker host
 remote-test:
+	@test -n "$(HOST)" || { echo "usage: make remote-test HOST=docker-host"; exit 1; }
 	SSH="$(SSH)" Tests/RemoteTest.sh $(HOST)
 
 .PHONY: all check install uninstall clean test remote-test

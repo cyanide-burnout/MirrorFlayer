@@ -4,7 +4,7 @@
 # SSH overrides the ssh command; SERVER, SERVER_IMAGE and TLS go to DockerTest.sh
 set -eu
 
-HOST=${1:?usage: $0 host}
+HOST=${1:?usage: Tests/RemoteTest.sh host}
 SSH=${SSH:-ssh}
 REMOTE=mirrorflayer-test
 

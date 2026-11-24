@@ -138,7 +138,7 @@ RSA first and the server cache later.
    `ReplicatorPositions` continues from it, writes its own position under the
    server id and leaves key 0 as it was.
 
-`Tests/RemoteTest.sh [host]` copies the tree to a Docker host and
+`Tests/RemoteTest.sh host` copies the tree to a Docker host over ssh and
 runs the test there with the same variables:
 
 ```
