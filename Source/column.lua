@@ -6,8 +6,8 @@
 -- strings in UTC without fractions, zero dates and NULL are box.NULL, binary
 -- strings are varbinary (MP_BIN) where Tarantool has it.
 
-local ffi = require('ffi')
-local bit = require('bit')
+local ffi     = require('ffi')
+local bit     = require('bit')
 local decimal = require('decimal')
 
 local protocol = require('mirrorflayer.protocol')
@@ -176,11 +176,11 @@ local function newdecimal(data, precision, scale)
   local whole = precision - scale
   local whole9, wholex = math.floor(whole / 9), whole % 9
   local frac9, fracx = math.floor(scale / 9), scale % 9
-  local size = whole9 * 4 + DIGITS[wholex] + frac9 * 4 + DIGITS[fracx]
-  local raw = data:bytes(size)
+  local size     = whole9 * 4 + DIGITS[wholex] + frac9 * 4 + DIGITS[fracx]
+  local raw      = data:bytes(size)
   local negative = band(byte(raw, 1), 0x80) == 0
-  local mask = negative and 0xff or 0
-  local buffer = {}
+  local mask     = negative and 0xff or 0
+  local buffer   = {}
   local stream, parts, value
 
   for index = 1, size do
@@ -335,7 +335,7 @@ end
 
 -- Parses the member list of enum('a','b') / set('a','b')
 local function values(definition)
-  local result = {}
+  local result   = {}
   local position = string.find(definition, '(', 1, true)
   if position == nil then
     return result
@@ -347,7 +347,7 @@ local function values(definition)
       break
     end
     local buffer = {}
-    local index = start + 1
+    local index  = start + 1
     while index <= #definition do
       local symbol = sub(definition, index, index)
       if symbol == "'" then
@@ -374,7 +374,7 @@ end
 -- Builds a column from a row of information_schema.COLUMNS:
 -- COLUMN_NAME, DATA_TYPE, COLUMN_TYPE
 local function describe(name, data_type, column_type)
-  local kind = KINDS[string.lower(data_type)]
+  local kind   = KINDS[string.lower(data_type)]
   local column = {
     name = name,
     type = string.lower(data_type),

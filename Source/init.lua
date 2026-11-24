@@ -11,13 +11,13 @@
 
 local fiber = require('fiber')
 local clock = require('clock')
-local log = require('log')
+local log   = require('log')
 
 local protocol = require('mirrorflayer.protocol')
-local column = require('mirrorflayer.column')
-local binlog = require('mirrorflayer.binlog')
-local mariadb = require('mirrorflayer.mariadb')
-local store = require('mirrorflayer.store')
+local column   = require('mirrorflayer.column')
+local binlog   = require('mirrorflayer.binlog')
+local mariadb  = require('mirrorflayer.mariadb')
+local store    = require('mirrorflayer.store')
 
 local E = binlog.E
 
@@ -103,7 +103,7 @@ function Replica:map(database, table_name, target, columns)
   check(type(database) == 'string' and type(table_name) == 'string', 'database and table must be strings')
   check(type(target) == 'string' or type(target) == 'function', 'target must be a space name or function')
   check(columns == nil or type(columns) == 'table', 'columns must be an array of names')
-  local id = database .. '.' .. table_name
+  local id     = database .. '.' .. table_name
   local source = self.sources[id]
   if source == nil then
     source = { id = id, database = database, table = table_name, specs = {} }
@@ -171,18 +171,18 @@ end
 -- Remembers the binlog position first, then loads every table; changes made
 -- meanwhile come again from the binlog and applying them is idempotent
 function Replica:resync(connection)
-  local state = mariadb.position(connection)
+  local state   = mariadb.position(connection)
   local started = clock.time()
   self.status = 'loading'
   self:say('info', 'full load at GTID %s', state)
   for _, source in ipairs(self.order) do
     local loader = store.load(source.targets, self.config.batch)
-    local names = {}
+    local names  = {}
     for index, item in ipairs(source.columns) do
       names[index] = protocol.identifier(item.name)
     end
     local columns = source.columns
-    local count = 0
+    local count   = 0
     connection:query(string.format('SELECT %s FROM %s.%s', table.concat(names, ', '),
       protocol.identifier(source.database), protocol.identifier(source.table)), function (raw)
         local row = {}
@@ -274,7 +274,7 @@ end
 
 function Replica:event(packet)
   local header = binlog.event(packet, self.checksum)
-  local type = header.type
+  local type   = header.type
 
   if type == E.FORMAT_DESCRIPTION then
     self.checksum = header.checksum == 1
@@ -290,7 +290,7 @@ function Replica:event(packet)
     gtid.changes = {}
     self.transaction = gtid
   elseif type == E.TABLE_MAP then
-    local map = binlog.table_map(header)
+    local map    = binlog.table_map(header)
     local source = self.sources[map.schema .. '.' .. map.table]
     if source == nil then
       self.maps[map.id] = false
@@ -327,7 +327,7 @@ function Replica:event(packet)
     self:commit(header)
   elseif type == E.QUERY then
     local query = binlog.query(header)
-    local text = statement(query.query)
+    local text  = statement(query.query)
     if text == 'BEGIN' then
       return
     end
@@ -393,7 +393,7 @@ function Replica:session(host, port)
   local timeout = self.config.heartbeat * 3
   while true do
     local packet = connection:read_packet(timeout)
-    local first = string.byte(packet, 1)
+    local first  = string.byte(packet, 1)
     if first == 0xff then
       error(protocol.server_error(packet), 0)
     end
@@ -457,7 +457,7 @@ end
 -- Metrics ----------------------------------------------------------------------
 
 function Replica:collect()
-  local stat = self:stat()
+  local stat   = self:stat()
   local labels = { name = self.config.name }
   self.gauges.lag:set(stat.lag or 0, labels)
   self.gauges.event:set(stat.event_time or 0, labels)

@@ -5,7 +5,7 @@ local ffi = require('ffi')
 local bit = require('bit')
 
 local protocol = require('mirrorflayer.protocol')
-local column = require('mirrorflayer.column')
+local column   = require('mirrorflayer.column')
 
 local band, bxor, bnot, rshift, tobit = bit.band, bit.bxor, bit.bnot, bit.rshift, bit.tobit
 
@@ -48,7 +48,7 @@ end
 
 local function crc32(data, length)
   local pointer = ffi.cast('const uint8_t *', data)
-  local value = tobit(0xffffffff)
+  local value   = tobit(0xffffffff)
   for index = 0, length - 1 do
     value = bxor(CRC[band(bxor(value, pointer[index]), 0xff)], rshift(value, 8))
   end
@@ -61,7 +61,7 @@ end
 -- marker byte; checksum tells that events end with CRC32.
 -- Returns the header with data (a reader limited to the body).
 local function event(packet, checksum)
-  local data = protocol.reader(packet)
+  local data   = protocol.reader(packet)
   local header = {
     timestamp = data:u32(),
     type = data:u8(),
@@ -99,7 +99,7 @@ local function event(packet, checksum)
 end
 
 local function rotate(header)
-  local data = header.data
+  local data     = header.data
   local position = data:u64()
   return { position = position, file = data:rest() }
 end
@@ -121,7 +121,7 @@ local function xid(header)
 end
 
 local function bitmap(data, count)
-  local raw = data:bytes(math.floor((count + 7) / 8))
+  local raw    = data:bytes(math.floor((count + 7) / 8))
   local result = {}
   for index = 0, count - 1 do
     result[index + 1] = band(string.byte(raw, math.floor(index / 8) + 1), bit.lshift(1, index % 8)) ~= 0
@@ -131,7 +131,7 @@ end
 
 -- TABLE_MAP_EVENT: { id, schema, table, types, meta }
 local function table_map(header)
-  local data = header.data
+  local data   = header.data
   local result = { id = data:u48() }
   data:skip(2) -- flags
   result.schema = data:bytes(data:u8())
@@ -144,7 +144,7 @@ local function table_map(header)
     result.types[index] = data:u8()
   end
   local length = data:lenenc()
-  local stop = data.position + length
+  local stop   = data.position + length
   result.meta = {}
   for index = 1, count do
     result.meta[index] = column.meta(data, result.types[index])
@@ -155,9 +155,9 @@ end
 
 -- Table id of a rows event, to look up the table map before decoding
 local function rows_table(header)
-  local data = header.data
+  local data  = header.data
   local saved = data.position
-  local id = data:u48()
+  local id    = data:u48()
   data.position = saved
   return id
 end
@@ -178,8 +178,8 @@ local function image(data, map, columns, present)
     end
   end
   local nulls = bitmap(data, count)
-  local row = {}
-  local slot = 0
+  local row   = {}
+  local slot  = 0
   for index = 1, #present do
     if present[index] then
       slot = slot + 1
@@ -211,7 +211,7 @@ local function rows(header, map, columns)
     protocol.fatal('%s.%s: rows event has %d columns, table map %d', map.schema, map.table, count, #map.types)
   end
   local before = bitmap(data, count)
-  local after = before
+  local after  = before
   if operation == 'update' then
     after = bitmap(data, count)
   end

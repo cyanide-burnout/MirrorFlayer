@@ -1,8 +1,8 @@
 -- MySQL client/server protocol: packets, greeting, authentication and
 -- COM_QUERY with a streamed text result set
 
-local ffi = require('ffi')
-local bit = require('bit')
+local ffi    = require('ffi')
+local bit    = require('bit')
 local digest = require('digest')
 
 local transport = require('mirrorflayer.transport')
@@ -434,7 +434,7 @@ end
 
 -- Column definition of protocol 4.1
 local function column_definition(packet)
-  local data = reader(packet)
+  local data   = reader(packet)
   local column = {}
   data:lenstr() -- catalog
   column.schema = data:lenstr()

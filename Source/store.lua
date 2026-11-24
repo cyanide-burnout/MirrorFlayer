@@ -1,9 +1,9 @@
 -- Applying rows to spaces and keeping the replication position
 
-local fiber = require('fiber')
+local fiber   = require('fiber')
 local msgpack = require('msgpack')
 local key_def = require('key_def')
-local log = require('log')
+local log     = require('log')
 
 local protocol = require('mirrorflayer.protocol')
 
@@ -109,7 +109,7 @@ end
 -- are source rows. Runs inside a transaction and must not yield.
 function Target:apply(operation, old, new)
   local before = old ~= nil and self:tuple(old) or nil
-  local after = new ~= nil and self:tuple(new) or nil
+  local after  = new ~= nil and self:tuple(new) or nil
   if self.call ~= nil then
     self.call(operation, before, after)
     return
@@ -205,7 +205,7 @@ function Load:finish()
   local deleted = 0
   for index, item in ipairs(self.targets) do
     if item.call == nil then
-      local seen = self.seen[index]
+      local seen  = self.seen[index]
       local stale = {}
       local count = 0
       for _, tuple in item.space:pairs() do

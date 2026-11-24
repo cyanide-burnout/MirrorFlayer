@@ -5,18 +5,18 @@
 --   purge   the position is purged from the binlog: error 1236, full reload
 --   legacy  a fresh instance continues from the Python position [0, gtid, 0]
 
-local ffi = require('ffi')
-local fiber = require('fiber')
-local log = require('log')
-local msgpack = require('msgpack')
-local decimal = require('decimal')
+local ffi       = require('ffi')
+local fiber     = require('fiber')
+local log       = require('log')
+local msgpack   = require('msgpack')
+local decimal   = require('decimal')
 local varbinary = require('varbinary')
 
 local mirrorflayer = require('mirrorflayer')
-local protocol = require('mirrorflayer.protocol')
+local protocol     = require('mirrorflayer.protocol')
 
 local phase = arg[1]
-local HOST = os.getenv('MARIADB_HOST') or 'mirrorflayer-mariadb'
+local HOST  = os.getenv('MARIADB_HOST') or 'mirrorflayer-mariadb'
 
 require('compat').binary_data_decoding = 'new'
 
@@ -155,7 +155,7 @@ end
 
 -- Replicator -----------------------------------------------------------------
 
-local journal = { reset = 0, insert = 0, update = 0, delete = 0 }
+local journal   = { reset = 0, insert = 0, update = 0, delete = 0 }
 local triggered = 0
 
 -- The position goes to ReplicatorPositions under the server id 1001
@@ -258,7 +258,7 @@ local function load()
   setup_mariadb()
   setup_spaces()
   local replica = replicator()
-  local target = caught_up(replica)
+  local target  = caught_up(replica)
 
   ok(replica:stat().resyncs == 1, 'one full load')
   locations_equal('load')

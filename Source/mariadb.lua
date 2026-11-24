@@ -56,10 +56,10 @@ end
 
 -- GTID_EVENT: { domain, gtid, standalone }
 local function gtid(header)
-  local data = header.data
+  local data     = header.data
   local sequence = data:u64()
-  local domain = data:u32()
-  local flags = data:u8()
+  local domain   = data:u32()
+  local flags    = data:u8()
   return {
     domain = domain,
     gtid = string.format('%d-%d-%s', domain, header.server, digits(sequence)),
