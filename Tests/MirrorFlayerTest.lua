@@ -1,5 +1,6 @@
 #!/usr/bin/env tarantool
--- Docker test of MirrorFlayer against MariaDB, driven by Tests/DockerTest.sh:
+-- Docker test of MirrorFlayer against MariaDB or MySQL (SERVER), with or
+-- without TLS (TLS = off | on | ca), driven by Tests/DockerTest.sh:
 --   load    full load, values of all types, INSERT/UPDATE/DELETE over the stream
 --   resume  restart continues from the stored GTID without a full load
 --   purge   the position is purged from the binlog: error 1236, full reload
@@ -16,7 +17,9 @@ local MirrorFlayer = require('MirrorFlayer')
 local protocol     = require('MirrorFlayer.Protocol')
 
 local phase = arg[1]
-local HOST  = os.getenv('MARIADB_HOST') or 'mirrorflayer-mariadb'
+local HOST   = os.getenv('SERVER_HOST') or 'mirrorflayer-server'
+local SERVER = os.getenv('SERVER') or 'mariadb'
+local TLS    = os.getenv('TLS') or 'off'
 
 require('compat').binary_data_decoding = 'new'
 
@@ -60,6 +63,31 @@ end
 
 exec("SET time_zone = '+00:00'")
 
+-- Binlog position of the source as the replicator prints it
+local function gtid()
+  local query = SERVER == 'mysql' and 'SELECT @@GLOBAL.gtid_executed' or 'SELECT @@GLOBAL.gtid_binlog_pos'
+  return (string.gsub(sql:value(query), '%s', ''))
+end
+
+-- Numbers first..last as a derived table with the column seq (no
+-- seq_1_to_N of MariaDB on MySQL)
+local function seq(first, last)
+  return string.format('(SELECT a.D + 10 * b.D + 100 * c.D + 1000 * d.D + 10000 * e.D + 1 AS seq ' ..
+    'FROM Registry.Digits a, Registry.Digits b, Registry.Digits c, Registry.Digits d, Registry.Digits e) s ' ..
+    'WHERE seq BETWEEN %d AND %d', first, last)
+end
+
+-- Name of the current binlog file
+local function binlog_file()
+  for _, statement in ipairs({ 'SHOW BINARY LOG STATUS', 'SHOW BINLOG STATUS', 'SHOW MASTER STATUS' }) do
+    local status, value = pcall(sql.value, sql, statement)
+    if status and value ~= nil then
+      return value
+    end
+  end
+  error('the binlog status is unknown', 0)
+end
+
 -- Schema ---------------------------------------------------------------------
 
 local TYPES = {
@@ -94,7 +122,8 @@ local TYPES = {
   { 'Bt', 'BIT(10)', "b'1010101010'", 682 },
   { 'En', "ENUM('red','green','blue')", "'green'", 'green' },
   { 'St', "SET('a','b','c')", "'a,c'", 'a,c' },
-  { 'Js', 'JSON', [['{"k": [1, 2]}']], '{"k": [1, 2]}' }
+  { 'Js', 'JSON', [['{"a": "x\\"y", "b": [true, false, null, 1.5, -3, 70000], "c": {}}']],
+    '{"a": "x\\"y", "b": [true, false, null, 1.5, -3, 70000], "c": {}}' }
 }
 
 local function type_columns()
@@ -105,7 +134,7 @@ local function type_columns()
   return table.concat(names, ', ')
 end
 
-local function setup_mariadb()
+local function setup_server()
   local columns, values = { 'ID INT UNSIGNED PRIMARY KEY' }, { '1' }
   for _, item in ipairs(TYPES) do
     table.insert(columns, item[1] .. ' ' .. item[2])
@@ -121,12 +150,14 @@ local function setup_mariadb()
       'SSID TINYINT UNSIGNED, Text VARCHAR(100))',
     'CREATE TABLE Gateways (BMC INT UNSIGNED, TPC INT UNSIGNED, Comment VARCHAR(20), PRIMARY KEY (BMC, TPC))',
     'CREATE TABLE Other (ID INT PRIMARY KEY AUTO_INCREMENT, Value VARCHAR(20))',
+    'CREATE TABLE Digits (D INT PRIMARY KEY)',
+    'INSERT INTO Digits VALUES (0), (1), (2), (3), (4), (5), (6), (7), (8), (9)',
     'CREATE TABLE Types (' .. table.concat(columns, ', ') .. ')',
     "CREATE USER IF NOT EXISTS 'replica'@'%' IDENTIFIED BY 'secret'",
     "GRANT SELECT, REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO 'replica'@'%'",
     'INSERT INTO Locations (ID, Node, Kind, Link, Slot, Modified) ' ..
-      "SELECT seq, 2000 + seq % 7, 'N', IF(seq % 10 = 0, NULL, seq * 10), seq % 3, '2026-01-02 03:04:05' FROM seq_1_to_100",
-    "INSERT INTO Users SELECT seq, seq % 2, CONCAT('C', seq), seq % 16, NULL FROM seq_1_to_20000",
+      "SELECT seq, 2000 + seq % 7, 'N', IF(seq % 10 = 0, NULL, seq * 10), seq % 3, '2026-01-02 03:04:05' FROM " .. seq(1, 100),
+    "INSERT INTO Users SELECT seq, seq % 2, CONCAT('C', seq), seq % 16, NULL FROM " .. seq(1, 20000),
     "INSERT INTO Gateways VALUES (1, 1, 'a'), (1, 2, 'b'), (2, 1, 'c')",
     'INSERT INTO Types (ID, ' .. type_columns() .. ') VALUES (' .. table.concat(values, ', ') .. ')',
     'INSERT INTO Types (ID) VALUES (3)')
@@ -165,7 +196,8 @@ local function replicator(only_locations)
   local replica = MirrorFlayer.new({
     hosts = { 'mirrorflayer-nowhere:3306', HOST .. ':3306' },
     user = 'replica', password = 'secret', server = KEY,
-    heartbeat = 1, retry = 1, batch = 500
+    heartbeat = 1, retry = 1, batch = 500,
+    tls = (TLS == 'on' and true) or (TLS == 'ca' and { ca = '/certs/ca.pem' }) or false
   })
   replica:map('Registry', 'Locations', 'GlobalLocations', { 'ID', 'Node', 'Kind', 'Link', 'Slot', 'Modified' })
   if not only_locations then
@@ -184,7 +216,7 @@ local function replicator(only_locations)
 end
 
 local function caught_up(replica)
-  local target = sql:value('SELECT @@GLOBAL.gtid_binlog_pos')
+  local target = gtid()
   wait(function ()
     local stat = replica:stat()
     if stat.status == 'failed' then
@@ -255,12 +287,13 @@ end
 -- Phases ---------------------------------------------------------------------
 
 local function load()
-  setup_mariadb()
+  setup_server()
   setup_spaces()
   local replica = replicator()
   local target  = caught_up(replica)
 
   ok(replica:stat().resyncs == 1, 'one full load')
+  ok(replica:stat().tls == (TLS ~= 'off'), 'TLS %s, connection %s', TLS, replica:stat().tls and 'encrypted' or 'plain')
   locations_equal('load')
   ok(box.space.GlobalProfiles:count() == 20000, 'GlobalProfiles has 20000 rows')
   ok(encode(box.space.GlobalProfiles:get(5)) == encode({ 5, 'C5', 1, 5 }), 'GlobalProfiles columns follow the space format')
@@ -279,7 +312,7 @@ local function load()
   triggered = 0
   exec('USE Registry',
     'INSERT INTO Locations (ID, Node, Kind, Link, Slot, Modified) ' ..
-      "SELECT seq, 3000, 'R', NULL, 1, '2026-05-06 07:08:09' FROM seq_101_to_110",
+      "SELECT seq, 3000, 'R', NULL, 1, '2026-05-06 07:08:09' FROM " .. seq(101, 110),
     "UPDATE Locations SET Node = 4000, Kind = 'X' WHERE ID BETWEEN 20 AND 29",
     'DELETE FROM Locations WHERE ID BETWEEN 30 AND 34',
     'UPDATE Locations SET ID = 1005 WHERE ID = 5',
@@ -321,7 +354,7 @@ end
 local function resume()
   setup_spaces()
   exec('USE Registry',
-    "INSERT INTO Locations (ID, Node, Kind, Modified) SELECT seq, 5000, 'D', '2026-09-09 09:09:09' FROM seq_201_to_205",
+    "INSERT INTO Locations (ID, Node, Kind, Modified) SELECT seq, 5000, 'D', '2026-09-09 09:09:09' FROM " .. seq(201, 205),
     'DELETE FROM Locations WHERE ID = 101',
     'UPDATE Locations SET Node = 5555 WHERE ID = 102')
   local replica = replicator()
@@ -343,7 +376,7 @@ local function purge()
     "INSERT INTO Locations (ID, Node, Kind, Modified) VALUES (400, 7, 'P', '2026-11-11 11:11:11')",
     'FLUSH BINARY LOGS')
   -- A file is purged only after its binlog checkpoint, which comes later
-  local file = sql:value('SHOW MASTER STATUS')
+  local file = binlog_file()
   wait(function ()
     exec('PURGE BINARY LOGS TO ' .. protocol.literal(file))
     local _, logs = sql:query('SHOW BINARY LOGS')
@@ -366,7 +399,7 @@ local function legacy()
   box.space.ReplicatorPositions:create_index('ID', { if_not_exists = true, unique = true, parts = { 1, 'unsigned' } })
   box.schema.space.create('GlobalLocations', { if_not_exists = true })
   box.space.GlobalLocations:create_index('ID', { if_not_exists = true, parts = { 1, 'unsigned' } })
-  local state = sql:value('SELECT @@GLOBAL.gtid_binlog_pos')
+  local state = gtid()
   box.space.ReplicatorPositions:replace({ 0, state, 0 })
 
   local replica = replicator(true)

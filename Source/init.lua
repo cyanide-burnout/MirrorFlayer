@@ -395,7 +395,8 @@ function Replica:session(host, port)
   local connection = self:connect(host, port)
   self.connection = connection
   self.host, self.port = host, port
-  self.dialect = connection.mariadb and mariadb or mysql
+  self.dialect   = connection.mariadb and mariadb or mysql
+  self.stats.tls = connection.secure == true
   self:say('info', 'connected to %s:%d, %s%s', host, port, connection.version, connection.secure and ', TLS' or '')
 
   for _, source in ipairs(self.order) do
@@ -573,6 +574,7 @@ function Replica:stat()
     transactions = stats.transactions,
     rows = stats.rows,
     resyncs = stats.resyncs,
+    tls = stats.tls,
     error = stats.error
   }
 end
