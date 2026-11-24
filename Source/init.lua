@@ -68,7 +68,7 @@ local function check(condition, format, ...)
   end
 end
 
--- Creates a replicator.
+-- Creates a replicator; the connection settings are checked by start().
 -- config: hosts (array of 'host[:port]'), user, password, server (replica
 -- server id), tls (false, true or { verify = 'none' | 'ca' | 'identity', ca,
 -- cert, key }), public_key (PEM of the source for caching_sha2_password
@@ -78,10 +78,6 @@ end
 -- (seconds between connection attempts)
 local function new(config)
   check(type(config) == 'table', 'config must be a table')
-  check(type(config.hosts) == 'table' and #config.hosts > 0, 'config.hosts must be a non-empty array')
-  check(type(config.user) == 'string', 'config.user must be a string')
-  check(config.password == nil or type(config.password) == 'string', 'config.password must be a string')
-  check(type(config.server) == 'number' and config.server > 0, 'config.server must be a positive number')
   local options = {}
   for key, value in pairs(DEFAULTS) do
     options[key] = value
@@ -549,6 +545,11 @@ function Replica:start()
   check(self.fiber == nil, 'already started')
   check(type(box.cfg) ~= 'function', 'call box.cfg{} before start()')
   check(#self.order > 0, 'nothing is mapped')
+  local config = self.config
+  check(type(config.hosts) == 'table' and #config.hosts > 0, 'config.hosts must be a non-empty array')
+  check(type(config.user) == 'string', 'config.user must be a string')
+  check(config.password == nil or type(config.password) == 'string', 'config.password must be a string')
+  check(type(config.server) == 'number' and config.server > 0, 'config.server must be a positive number')
   self.bound    = false
   self.stopping = false
   self.status = 'starting'
