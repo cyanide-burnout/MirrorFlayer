@@ -157,6 +157,15 @@ end
 
 local journal   = { reset = 0, insert = 0, update = 0, delete = 0 }
 local triggered = 0
+local profiled  = 0
+
+-- Like the triggers of Registry: a message to a channel that fills up, so a
+-- write in a transaction yields and is aborted
+local channel = fiber.channel(1)
+fiber.create(function ()
+  while channel:get() ~= nil do
+  end
+end)
 
 -- The position goes to ReplicatorPositions under the server id 1001
 local KEY = 1001
@@ -180,6 +189,12 @@ local function replicator(only_locations)
   box.space.GlobalLocations:on_replace(function ()
     triggered = triggered + 1
   end)
+  if not only_locations then
+    box.space.GlobalProfiles:on_replace(function ()
+      profiled = profiled + 1
+      channel:put(true, 1)
+    end)
+  end
   return replica:start()
 end
 
@@ -272,6 +287,7 @@ local function load()
   end
   ok(encode(box.space.Types:get(3)) == encode(box.tuple.new(nulls)), 'load: Types row 3 is all NULL')
   ok(journal.reset == 1 and journal.insert == 100, 'function target: reset and 100 inserts (%d, %d)', journal.reset, journal.insert)
+  ok(profiled >= 20000, 'a yielding trigger did not stop the load (%d calls)', profiled)
   ok(triggered >= 100, 'on_replace triggers fired during the load (%d)', triggered)
   stored_position(replica, KEY, target)
 
@@ -293,6 +309,7 @@ local function load()
     'ROLLBACK',
     "INSERT INTO Other (Value) VALUES ('unmapped')",
     "UPDATE Gateways SET TPC = 3, Comment = 'moved' WHERE BMC = 1 AND TPC = 2",
+    "UPDATE Users SET Text = 'yield' WHERE ID BETWEEN 100 AND 109",
     'INSERT INTO Types (ID, ' .. type_columns() .. ') SELECT 2, ' .. type_columns() .. ' FROM Types WHERE ID = 1',
     'INSERT INTO Types (ID) VALUES (4)',
     'ALTER TABLE Locations ADD COLUMN Extra INT',
@@ -305,6 +322,8 @@ local function load()
   ok(encode(box.space.GlobalProfiles:get(7)) == encode({ 7, 'CHANGED', 1, box.NULL }), 'update in a multi-table transaction')
   ok(box.space.GlobalProfiles:get(8) == nil and box.space.GlobalProfiles:count() == 19999, 'delete in a multi-table transaction')
   ok(box.space.GlobalGateways:get({ 1, 2 }) == nil and box.space.GlobalGateways:get({ 1, 3 }) ~= nil, 'composite key change')
+  ok(replica:stat().split >= 1, 'a transaction with a yielding trigger was applied statement by statement (%d)', replica:stat().split)
+  ok(encode(box.space.GlobalProfiles:get(105)) == encode({ 105, 'C105', 1, 9 }), 'its rows are in place')
   check_types(2, 'stream')
   same_rows(1, 2, 'load vs stream')
   same_rows(3, 4, 'load vs stream NULL')
@@ -357,6 +376,7 @@ local function purge()
   locations_equal('purge')
   ok(box.space.GlobalLocations:get(1) == nil, 'rows deleted while down are removed by the reload')
   ok(box.space.GlobalProfiles:count() == 19999, 'GlobalProfiles kept 19999 rows')
+  ok(profiled == 0, 'the reload did not rewrite unchanged profiles (%d trigger calls)', profiled)
   stored_position(replica, KEY, target)
   replica:stop()
 end

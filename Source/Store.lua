@@ -127,35 +127,15 @@ function Target:apply(operation, old, new)
   end
 end
 
--- Full load ------------------------------------------------------------------
+-- Transactions -----------------------------------------------------------------
 
--- Loads a snapshot of a table into its targets: rows are written over the
--- current content in batches, rows missing from the snapshot are deleted
--- afterwards, so the space never goes empty. Function targets get 'reset'
--- first and then 'insert' for each row.
-local Load = {}
-Load.__index = Load
-
-local function load(targets, batch)
-  local self = setmetatable({ targets = targets, batch = batch, pending = {}, seen = {} }, Load)
-  for index, item in ipairs(targets) do
-    if item.call ~= nil then
-      box.begin()
-      local status, problem = pcall(item.call, 'reset', nil, nil)
-      if not status then
-        box.rollback()
-        error(problem, 0)
-      end
-      box.commit()
-    else
-      self.seen[index] = {}
-    end
-  end
-  return self
-end
+-- A yield inside a transaction aborts it with this code, also in triggers:
+-- on_replace triggers that wait on a full channel make writes fail so
+local YIELD = box.error.TRANSACTION_YIELD or 154
 
 local function trace(problem)
-  if type(problem) == 'table' then
+  if type(problem) == 'table' or
+     (type(problem) == 'cdata' and problem.code ~= nil) then
     return problem
   end
   return debug.traceback(tostring(problem), 2)
@@ -165,10 +145,97 @@ local function transaction(action)
   box.begin()
   local status, problem = xpcall(action, trace)
   if not status then
-    box.rollback()
+    if box.is_in_txn() then
+      box.rollback()
+    end
     error(problem, 0)
   end
   box.commit()
+end
+
+local function yielded(problem)
+  return type(problem) == 'cdata' and problem.code == YIELD
+end
+
+-- Runs perform(statement) for every statement and then final() in one
+-- transaction. When a trigger yields and aborts it, runs each statement in a
+-- transaction of its own, repeating it after a pause until its triggers pass
+-- (applying is idempotent), and final() last. Returns true when atomic.
+local function apply(statements, perform, final)
+  local status, problem = pcall(transaction, function ()
+    for _, statement in ipairs(statements) do
+      perform(statement)
+    end
+    if final ~= nil then
+      final()
+    end
+  end)
+  if status then
+    return true
+  end
+  if not yielded(problem) then
+    error(problem, 0)
+  end
+  for _, statement in ipairs(statements) do
+    local delay = 0.001
+    while true do
+      local done, failure = pcall(transaction, function ()
+        perform(statement)
+      end)
+      if done then
+        break
+      end
+      if not yielded(failure) then
+        error(failure, 0)
+      end
+      fiber.sleep(delay)
+      delay = math.min(delay * 2, 0.1)
+    end
+  end
+  if final ~= nil then
+    transaction(final)
+  end
+  return false
+end
+
+-- Full load ------------------------------------------------------------------
+
+-- Loads a snapshot of a table into its targets: rows are written over the
+-- current content in batches, rows missing from the snapshot are deleted
+-- afterwards, so the space never goes empty. Rows equal to the stored tuples
+-- are not written, so their triggers do not fire. Function targets get
+-- 'reset' first and then 'insert' for each row.
+local Load = {}
+Load.__index = Load
+
+local function load(targets, batch)
+  local self = setmetatable({ targets = targets, batch = batch, pending = {}, seen = {}, written = 0 }, Load)
+  for index, item in ipairs(targets) do
+    if item.call ~= nil then
+      transaction(function ()
+        item.call('reset', nil, nil)
+      end)
+    else
+      self.seen[index] = {}
+    end
+  end
+  return self
+end
+
+function Load:write(row)
+  for index, item in ipairs(self.targets) do
+    local tuple = item:tuple(row)
+    if item.call ~= nil then
+      item.call('insert', nil, tuple)
+    else
+      local stored = item.space:get(item:keyof(tuple))
+      if stored == nil or msgpack.encode(stored) ~= msgpack.encode(tuple) then
+        stored = item.space:replace(tuple)
+        self.written = self.written + 1
+      end
+      self.seen[index][msgpack.encode(item.definition:extract_key(stored))] = true
+    end
+  end
 end
 
 function Load:flush()
@@ -177,18 +244,9 @@ function Load:flush()
     return
   end
   self.pending = {}
-  transaction(function ()
-    for _, row in ipairs(rows) do
-      for index, item in ipairs(self.targets) do
-        if item.call ~= nil then
-          item.call('insert', nil, item:tuple(row))
-        else
-          local stored = item.space:replace(item:tuple(row))
-          self.seen[index][msgpack.encode(item.definition:extract_key(stored))] = true
-        end
-      end
-    end
-  end)
+  if not apply(rows, function (row) self:write(row) end) then
+    self.split = true
+  end
   fiber.yield()
 end
 
@@ -219,11 +277,11 @@ function Load:finish()
         end
       end
       for first = 1, #stale, self.batch do
-        transaction(function ()
-          for position = first, math.min(first + self.batch - 1, #stale) do
-            item.space:delete(stale[position])
-          end
-        end)
+        local keys = {}
+        for position = first, math.min(first + self.batch - 1, #stale) do
+          table.insert(keys, stale[position])
+        end
+        apply(keys, function (key) item.space:delete(key) end)
         fiber.yield()
       end
       deleted = deleted + #stale
@@ -295,5 +353,6 @@ return {
   target = target,
   load = load,
   transaction = transaction,
+  apply = apply,
   position = position
 }

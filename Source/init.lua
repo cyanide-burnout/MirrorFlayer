@@ -90,7 +90,7 @@ local function new(config)
     sources = {},
     order = {},
     status = 'created',
-    stats = { transactions = 0, rows = 0, resyncs = 0 }
+    stats = { transactions = 0, rows = 0, resyncs = 0, split = 0 }
   }, Replica)
 end
 
@@ -193,7 +193,8 @@ function Replica:resync(connection)
         count = count + 1
       end)
     local deleted = loader:finish()
-    self:say('info', '%s: %d rows loaded, %d stale rows deleted', source.id, count, deleted)
+    self:say('info', '%s: %d rows loaded, %d written, %d stale rows deleted%s', source.id, count,
+      loader.written, deleted, loader.split and ', triggers yielded' or '')
   end
   store.transaction(function ()
     self.position:put(state, clock.time())
@@ -219,8 +220,9 @@ function Replica:flush()
 end
 
 -- Applies a finished binlog transaction with its position in one box
--- transaction; transactions without changes only move the position, which
--- is written at most once a second
+-- transaction; when a trigger of a target yields, statement by statement and
+-- the position last (counted in split). Transactions without changes only
+-- move the position, which is written at most once a second
 function Replica:commit(header)
   local transaction = self.transaction
   self.transaction = nil
@@ -239,14 +241,20 @@ function Replica:commit(header)
     end
     return
   end
-  store.transaction(function ()
-    for _, change in ipairs(transaction.changes) do
-      for _, target in ipairs(change[1].targets) do
-        target:apply(change[2], change[3], change[4])
-      end
+  local statements = {}
+  for _, change in ipairs(transaction.changes) do
+    for _, target in ipairs(change[1].targets) do
+      table.insert(statements, { target, change[2], change[3], change[4] })
     end
+  end
+  local atomic = store.apply(statements, function (item)
+    item[1]:apply(item[2], item[3], item[4])
+  end, function ()
     self.position:put(state, header.timestamp)
   end)
+  if not atomic then
+    stats.split = stats.split + 1
+  end
   self.dirty = false
   self.stored = clock.time()
   stats.applied_time = self.stored
@@ -543,6 +551,7 @@ function Replica:stat()
     transactions = stats.transactions,
     rows = stats.rows,
     resyncs = stats.resyncs,
+    split = stats.split,
     error = stats.error
   }
 end
