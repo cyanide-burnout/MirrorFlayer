@@ -4,9 +4,15 @@ A Tarantool module that replicates MySQL/MariaDB tables into Tarantool spaces
 over the replication protocol (binlog). It runs inside Tarantool itself, in
 fibers: no separate process, no YAML, no MySQL sources or client library.
 
-It replaces a Python `replicatord` (pymysqlreplication) that fed Tarantool
-from a MariaDB/Galera cluster, and keeps the values that replicator wrote, so
-the code reading the spaces sees no difference.
+The goal of the project is to replace
+[tarantool/mysql-tarantool-replication](https://github.com/tarantool/mysql-tarantool-replication)
+— `replicatord`, a separate C++ daemon built on libslave and the MySQL client
+library, configured in YAML and writing into Tarantool over the network — and
+its Python rewrites on top of
+[python-mysql-replication](https://github.com/julien-duponchelle/python-mysql-replication)
+with a replicator that lives inside Tarantool. MirrorFlayer keeps the values
+those replicators wrote and reads the position they stored, so the code
+reading the spaces sees no difference and the switch needs no reload.
 
 MariaDB and MySQL, with or without TLS; `mysql_native_password`,
 `caching_sha2_password` and `sha256_password`. Internals, OpenSSL findings
