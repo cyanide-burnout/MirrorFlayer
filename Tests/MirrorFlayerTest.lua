@@ -190,9 +190,9 @@ local journal   = { reset = 0, insert = 0, update = 0, delete = 0 }
 local triggered = 0
 local profiled  = 0
 
--- Like the triggers of Registry: a message to a channel that fills up, so a
--- write in a transaction yields and is aborted
-local channel = fiber.channel(1)
+-- A trigger that puts to a channel smaller than a batch: a write in a
+-- transaction finds it full, yields and is aborted
+local channel = fiber.channel(10)
 fiber.create(function ()
   while channel:get() ~= nil do
   end
@@ -343,7 +343,7 @@ local function load()
     'ROLLBACK',
     "INSERT INTO Other (Value) VALUES ('unmapped')",
     "UPDATE Gateways SET TPC = 3, Comment = 'moved' WHERE BMC = 1 AND TPC = 2",
-    "UPDATE Users SET Text = 'yield' WHERE ID BETWEEN 100 AND 109",
+    "UPDATE Users SET Text = 'yield' WHERE ID BETWEEN 100 AND 129",
     'INSERT INTO Types (ID, ' .. type_columns() .. ') SELECT 2, ' .. type_columns() .. ' FROM Types WHERE ID = 1',
     'INSERT INTO Types (ID) VALUES (4)',
     'ALTER TABLE Locations ADD COLUMN Extra INT',

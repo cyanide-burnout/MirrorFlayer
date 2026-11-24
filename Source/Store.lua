@@ -160,36 +160,33 @@ end
 -- Pace of writes. The fiber yields after every transaction of at most batch
 -- statements, so fibers reading the channels that triggers write to keep up.
 -- A transaction a yielding trigger aborts nevertheless halves the statements
--- per transaction and turns on a pause between transactions until the
--- channels drain; after a minute without aborts the pace is back to batch.
+-- per transaction and pauses once so the channels drain; after a minute
+-- without aborts the pace is back to batch.
 -- A storm of aborts is avoided on purpose: Tarantool 3.9 was seen to crash in
 -- the allocator after a series of them.
 local CALM  = 60
 local PAUSE = 0.01
 
-local pace = { limit = 100, ceiling = 100, size = 100, pause = 0, streak = 0, calm = 0, aborts = 0 }
+local pace = { limit = 100, ceiling = 100, size = 100, streak = 0, calm = 0, aborts = 0 }
 
 local function configure(batch)
   pace.limit   = batch
   pace.ceiling = batch
   pace.size    = batch
-  pace.pause   = 0
 end
 
 local function aborted(count)
   pace.aborts  = pace.aborts + 1
   pace.ceiling = math.max(1, math.floor(count / 2))
   pace.size    = pace.ceiling
-  pace.pause   = math.min(math.max(pace.pause * 2, PAUSE), 0.5)
   pace.streak  = 0
   pace.calm    = fiber.clock() + CALM
-  log.warn('MirrorFlayer: a trigger yielded, %d statements per transaction with %.2f s pauses', pace.size, pace.pause)
+  log.warn('MirrorFlayer: a trigger yielded, %d statements per transaction for a while', pace.size)
 end
 
 local function succeeded()
   if pace.ceiling < pace.limit and fiber.clock() > pace.calm then
     pace.ceiling = pace.limit
-    pace.pause   = 0
   end
   pace.streak = pace.streak + 1
   if pace.streak >= 10 and pace.size < pace.ceiling then
@@ -220,15 +217,12 @@ local function apply(statements, perform, final)
       chunks = chunks + 1
       first  = last + 1
       succeeded()
+      fiber.yield()
     elseif yielded(problem) then
       aborted(last - first + 1)
+      fiber.sleep(PAUSE)
     else
       error(problem, 0)
-    end
-    if pace.pause > 0 then
-      fiber.sleep(pace.pause)
-    else
-      fiber.yield()
     end
   until first > count
   return chunks == 1
