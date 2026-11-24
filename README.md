@@ -126,3 +126,7 @@ make test                                  # Docker test, see Tests/
 `Tests/RemoteTest.sh [host]` copies the tree to a Docker host and
 runs the test there.
 
+
+## License
+
+MIT, see [LICENSE](LICENSE).
