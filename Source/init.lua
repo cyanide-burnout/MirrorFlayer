@@ -400,7 +400,24 @@ function Replica:event(packet)
   -- PREVIOUS_GTIDS, TRANSACTION_CONTEXT, VIEW_CHANGE need nothing
 end
 
+-- Resolves the target spaces and opens the position space. It runs in the
+-- fiber, so start() may be called before other code has made the spaces;
+-- a missing space is retried with the connection.
+function Replica:bind()
+  for _, source in ipairs(self.order) do
+    source.targets = {}
+    for _, spec in ipairs(source.specs) do
+      table.insert(source.targets, store.target(spec.target, spec.columns))
+    end
+  end
+  self.position = store.position(self.config.position, self.config.key, self.config.name)
+  self.bound    = true
+end
+
 function Replica:session(host, port)
+  if not self.bound then
+    self:bind()
+  end
   local connection = self:connect(host, port)
   self.connection = connection
   self.host, self.port = host, port
@@ -532,18 +549,7 @@ function Replica:start()
   check(self.fiber == nil, 'already started')
   check(type(box.cfg) ~= 'function', 'call box.cfg{} before start()')
   check(#self.order > 0, 'nothing is mapped')
-  local status, problem = pcall(function ()
-    for _, source in ipairs(self.order) do
-      source.targets = {}
-      for _, spec in ipairs(source.specs) do
-        table.insert(source.targets, store.target(spec.target, spec.columns))
-      end
-    end
-    self.position = store.position(self.config.position, self.config.key, self.config.name)
-  end)
-  if not status then
-    error(tostring(problem), 2)
-  end
+  self.bound    = false
   self.stopping = false
   self.status = 'starting'
   store.configure(self.config.batch)

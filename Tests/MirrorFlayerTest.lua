@@ -218,9 +218,11 @@ local function replicator(only_locations)
     replica:map('Registry', 'Gateways', 'GlobalGateways', { 'BMC', 'TPC', 'Comment' })
     replica:map('Registry', 'Types', 'Types')
   end
-  box.space.GlobalLocations:on_replace(function ()
-    triggered = triggered + 1
-  end)
+  if box.space.GlobalLocations ~= nil then
+    box.space.GlobalLocations:on_replace(function ()
+      triggered = triggered + 1
+    end)
+  end
   if not only_locations then
     box.space.GlobalProfiles:on_replace(function ()
       profiled = profiled + 1
@@ -418,12 +420,15 @@ end
 local function legacy()
   box.schema.space.create('ReplicatorPositions', { if_not_exists = true })
   box.space.ReplicatorPositions:create_index('ID', { if_not_exists = true, unique = true, parts = { 1, 'unsigned' } })
-  box.schema.space.create('GlobalLocations', { if_not_exists = true })
-  box.space.GlobalLocations:create_index('ID', { if_not_exists = true, parts = { 1, 'unsigned' } })
   local state = gtid()
   box.space.ReplicatorPositions:replace({ 0, state, 0 })
 
+  -- Started before its space exists, as when a later plug-in makes it
   local replica = replicator(true)
+  wait(function () return string.find(tostring(replica:stat().error), 'does not exist', 1, true) ~= nil end, 'a missing space')
+  ok(replica:stat().status ~= 'failed', 'a missing space is retried: %s', tostring(replica:stat().error))
+  box.schema.space.create('GlobalLocations', { if_not_exists = true })
+  box.space.GlobalLocations:create_index('ID', { if_not_exists = true, parts = { 1, 'unsigned' } })
   exec("INSERT INTO Registry.Locations (ID, Node, Kind, Modified) VALUES (600, 8, 'L', '2026-12-12 12:12:12')")
   local target = caught_up(replica)
   ok(replica:stat().resyncs == 0, 'continued from the Python position without a full load')

@@ -58,6 +58,9 @@ Configuration is Lua only.
 ### Mapping
 
 `replica:map(database, table, target, columns)` — only before `start()`.
+Targets are looked up by the replication fiber, so `start()` may come before
+the spaces are made; a missing space is retried with the connection, other
+mapping errors stop the replicator (`stat().error`).
 
 * `target` is a space name, or a function `function(operation, old, new)`.
 * `columns` are the source column names in tuple order. Without them the field

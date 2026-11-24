@@ -27,7 +27,8 @@ local function target(spec, columns)
   else
     local space = box.space[spec]
     if space == nil then
-      protocol.fatal('space %s does not exist', tostring(spec))
+      -- Not fatal: the space may be made later, the replicator retries
+      error(protocol.failure(string.format('space %s does not exist yet', tostring(spec))), 0)
     end
     if space.index[0] == nil then
       protocol.fatal('space %s has no primary index', spec)
