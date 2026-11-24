@@ -130,6 +130,13 @@ make test                                  # Docker test, see Tests/
 and `caching_sha2_password` only while the server has the password cached
 (it needs RSA for the full authentication without TLS).
 
+With LuaRocks of Tarantool (`tt rocks`), the same headers are needed:
+
+```
+tt rocks install https://raw.githubusercontent.com/cyanide-burnout/MirrorFlayer/main/mirrorflayer-scm-1.rockspec
+tt rocks make mirrorflayer-scm-1.rockspec   # from a checkout
+```
+
 ## Tests
 
 `Tests/DockerTest.sh` builds `TLS.so`, runs MariaDB or MySQL with a row-based
