@@ -323,11 +323,19 @@ local function position(space_name, key, name)
   return setmetatable({ space = space, key = key, name = name }, Position)
 end
 
+-- A GTID state of MariaDB (0-1-100,1-2-5) or a GTID set of MySQL (uuid:1-5:7),
+-- not the binlog file name the C++ replicatord kept under the same key
+local function gtid(value)
+  return type(value) == 'string' and
+    (string.match(value, '^%d+%-%d+%-%d+[%d%-,%s]*$') ~= nil or
+     string.match(value, '^%x+%-%x+%-%x+%-%x+%-%x+:[%x%-:,%s]*$') ~= nil)
+end
+
 -- Position of the Python replicator: key 0 in this space or in ReplicatorPositions
 function Position:legacy()
   for _, space in ipairs({ self.space, box.space.ReplicatorPositions }) do
     local status, tuple = pcall(space.get, space, LEGACY)
-    if status and tuple ~= nil and type(tuple[2]) == 'string' and tuple[2] ~= '' then
+    if status and tuple ~= nil and gtid(tuple[2]) then
       log.info('MirrorFlayer[%s]: continuing from the position of the Python replicator %s', self.name, tuple[2])
       return tuple[2]
     end

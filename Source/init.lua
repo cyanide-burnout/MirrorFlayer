@@ -396,6 +396,7 @@ function Replica:session(host, port)
     heartbeat = self.config.heartbeat
   })
   self.status = 'streaming'
+  self.stats.error = nil
   self:say('info', 'streaming from GTID %s', state ~= '' and state or '(start)')
 
   local timeout = self.config.heartbeat * 3
