@@ -2,19 +2,19 @@
 -- load and for binlog row images, so both paths give the same values.
 --
 -- Integers are numbers (uint64_t/int64_t cdata above 2^53), zero dates and
--- NULL are box.NULL, binary strings are varbinary (MP_BIN) where Tarantool
--- has it, UUID is uuid of Tarantool. DATETIME, TIMESTAMP and DATE follow the
--- datetime mode of the replicator, all in UTC:
---   'datetime'  datetime of Tarantool with fractions (the default)
---   'number'    seconds since the Unix epoch with fractions
---   'string'    'YYYY-MM-DD HH:MM:SS' / 'YYYY-MM-DD' without fractions, as the
---               Python replicator wrote them
+-- NULL are box.NULL, binary strings are varbinary (MP_BIN), UUID is uuid and
+-- JSON is MsgPack maps and arrays. DATETIME, TIMESTAMP, DATE and TIME follow
+-- the datetime mode of the replicator, all in UTC:
+--   'datetime'  datetime of Tarantool with fractions, TIME as interval
+--               (the default)
+--   'number'    seconds since the Unix epoch with fractions, TIME in seconds
 
 local ffi      = require('ffi')
 local bit      = require('bit')
 local uuid     = require('uuid')
 local decimal  = require('decimal')
 local datetime = require('datetime')
+local json     = require('json')
 
 local protocol = require('MirrorFlayer.Protocol')
 
@@ -57,7 +57,7 @@ local KINDS = {
   decimal = 'decimal', numeric = 'decimal',
   date = 'date', datetime = 'datetime', timestamp = 'datetime', time = 'time', year = 'year',
   char = 'string', varchar = 'string', tinytext = 'string', text = 'string',
-  mediumtext = 'string', longtext = 'string', json = 'string',
+  mediumtext = 'string', longtext = 'string', json = 'json',
   binary = 'bytes', varbinary = 'bytes', tinyblob = 'bytes', blob = 'bytes',
   mediumblob = 'bytes', longblob = 'bytes',
   bit = 'bit', enum = 'enum', set = 'set', uuid = 'uuid'
@@ -87,12 +87,6 @@ local function moment(column, year, month, day, hour, minute, second, usec)
   if year == 0 and month == 0 and day == 0 then
     return NULL
   end
-  if column.datetime == 'string' then
-    if column.kind == 'date' then
-      return format('%04d-%02d-%02d', year, month, day)
-    end
-    return format('%04d-%02d-%02d %02d:%02d:%02d', year, month, day, hour, minute, second)
-  end
   local value = datetime.new({ year = year, month = month, day = day, hour = hour, min = minute,
     sec = second, nsec = usec * 1000, tzoffset = 0 })
   if column.datetime == 'number' then
@@ -106,13 +100,31 @@ local function instant(column, seconds, usec)
   if seconds == 0 and usec == 0 then
     return NULL
   end
-  if column.datetime == 'string' then
-    return os.date('!%Y-%m-%d %H:%M:%S', seconds)
-  end
   if column.datetime == 'number' then
     return seconds + usec / 1e6
   end
   return datetime.new({ timestamp = seconds, nsec = usec * 1000, tzoffset = 0 })
+end
+
+-- A duration of a TIME column: interval of Tarantool, or seconds in the number
+-- mode; negative is the sign of the whole duration
+local function duration(column, negative, hours, minutes, seconds, usec)
+  local sign = negative and -1 or 1
+  if column.datetime == 'number' then
+    return sign * (hours * 3600 + minutes * 60 + seconds + usec / 1e6)
+  end
+  return datetime.interval.new({ hour = sign * hours, min = sign * minutes, sec = sign * seconds,
+    nsec = sign * usec * 1000 })
+end
+
+-- Parses '[-]H+:MM:SS[.ffffff]' of the text protocol
+local function clock(column, text)
+  local sign, hours, minutes, seconds, fraction = string.match(text, '^(%-?)(%d+):(%d+):(%d+)%.?(%d*)')
+  if hours == nil then
+    error(protocol.failure('bad time ' .. text), 0)
+  end
+  local usec = fraction ~= '' and tonumber(sub(fraction .. '000000', 1, 6)) or 0
+  return duration(column, sign == '-', tonumber(hours), tonumber(minutes), tonumber(seconds), usec)
 end
 
 -- Parses 'YYYY-MM-DD[ HH:MM:SS[.ffffff]]' of the text protocol
@@ -155,14 +167,15 @@ local TEXT = {
   decimal  = function (column, text) return decimal.new(text) end,
   date     = temporal,
   datetime = temporal,
-  time     = function (column, text) return string.match(text, '^%-?%d+:%d%d:%d%d') or text end,
+  time     = clock,
   year     = function (column, text) return tonumber(text) end,
   string   = function (column, text) return text end,
   bytes    = function (column, text) return binary(text) end,
   bit      = function (column, text) return bits(text) end,
   enum     = function (column, text) return text end,
   set      = function (column, text) return text end,
-  uuid     = function (column, text) return uuid.fromstr(text) end
+  uuid     = function (column, text) return uuid.fromstr(text) end,
+  json     = function (column, text) return json.decode(text) end
 }
 
 -- Converts a text value of the column; text is a string or box.NULL
@@ -245,6 +258,29 @@ local function fraction(data, precision)
   return data:be(size) * 10 ^ (6 - 2 * size)
 end
 
+-- TIME2: the packed value (seconds part << 24 | microseconds) as MySQL keeps
+-- it, three bytes and the fraction, or six bytes together for 5-6 digits;
+-- returns negative, hours, minutes, seconds, microseconds
+local function time2(data, precision)
+  local size = math.floor((precision + 1) / 2)
+  local packed
+  if size == 3 then
+    packed = data:be(6) - 0x800000000000
+  else
+    local whole = data:be(3) - 0x800000
+    local part  = size == 1 and data:u8() or size == 2 and data:be(2) or 0
+    if whole < 0 and part ~= 0 then
+      whole = whole + 1
+      part  = part - (size == 1 and 0x100 or 0x10000)
+    end
+    packed = whole * 0x1000000 + part * (size == 1 and 10000 or size == 2 and 100 or 0)
+  end
+  local negative = packed < 0
+  packed = math.abs(packed)
+  local whole = math.floor(packed / 0x1000000)
+  return negative, math.floor(whole / 0x1000) % 0x400, math.floor(whole / 64) % 64, whole % 64, packed % 0x1000000
+end
+
 local function length_prefixed(data, size)
   local length
   if size == 1 then length = data:u8()
@@ -256,9 +292,9 @@ end
 
 -- MySQL binary JSON ------------------------------------------------------------
 
--- The binlog of MySQL keeps JSON in its binary form; it is printed back the way
--- the text protocol prints it: '{"a": 1, "b": [true, null]}', keys in the
--- stored order, so the full load and the stream give the same string
+-- The binlog of MySQL keeps JSON in its binary form; it becomes the same Lua
+-- values json.decode() gives for the text protocol: maps and arrays marked for
+-- MsgPack, JSON null as box.NULL
 
 local J = {
   SMALL_OBJECT = 0x0, LARGE_OBJECT = 0x1, SMALL_ARRAY = 0x2, LARGE_ARRAY = 0x3,
@@ -266,41 +302,17 @@ local J = {
   INT64 = 0x9, UINT64 = 0xa, DOUBLE = 0xb, STRING = 0xc, OPAQUE = 0xf
 }
 
-local LITERALS = { [0] = 'null', 'true', 'false' }
+local MAP   = { __serialize = 'map' }
+local ARRAY = { __serialize = 'array' }
 
-local ESCAPES = {
-  ['"'] = '\\"', ['\\'] = '\\\\', ['\b'] = '\\b', ['\f'] = '\\f',
-  ['\n'] = '\\n', ['\r'] = '\\r', ['\t'] = '\\t'
-}
-
-local function quote(text)
-  return '"' .. string.gsub(text, '[%z\1-\31"\\]', function (symbol)
-    return ESCAPES[symbol] or format('\\u%04x', byte(symbol))
-  end) .. '"'
-end
-
-local function integer_text(value)
-  if type(value) == 'number' then
-    return format('%.0f', value)
+local function literal(value)
+  if value == 1 then
+    return true
   end
-  return (string.gsub(tostring(value), 'U?LL$', ''))
-end
-
--- Shortest text that reads back as the same double, exponents without '+'
--- and leading zeros, integral values with '.0'
-local function double_text(value)
-  local text
-  for precision = 15, 17 do
-    text = format('%.' .. precision .. 'g', value)
-    if tonumber(text) == value then
-      break
-    end
+  if value == 2 then
+    return false
   end
-  text = string.gsub(text, 'e%+?(%-?)0*(%d)', 'e%1%2')
-  if string.find(text, '[%.eni]') == nil then
-    text = text .. '.0'
-  end
-  return text
+  return NULL
 end
 
 local json_value
@@ -323,24 +335,23 @@ local function json_entry(data, base, large)
   local kind = data:u8()
   local value
   if kind == J.LITERAL then
-    value = large and data:u32() or data:u16()
-    return LITERALS[value] or 'null'
+    return literal(large and data:u32() or data:u16())
   end
   if kind == J.INT16 then
     value = data:int(2)
     if large then data:skip(2) end
-    return integer_text(value)
+    return value
   end
   if kind == J.UINT16 then
     value = data:u16()
     if large then data:skip(2) end
-    return integer_text(value)
+    return value
   end
   if large and kind == J.INT32 then
-    return integer_text(data:int(4))
+    return data:int(4)
   end
   if large and kind == J.UINT32 then
-    return integer_text(data:u32())
+    return data:u32()
   end
   local offset = large and data:u32() or data:u16()
   local saved  = data.position
@@ -356,7 +367,7 @@ local function json_container(data, kind)
   local object = kind == J.SMALL_OBJECT or kind == J.LARGE_OBJECT
   local count  = large and data:u32() or data:u16()
   local keys   = {}
-  local items  = {}
+  local result = setmetatable({}, object and MAP or ARRAY)
   data:skip(large and 4 or 2) -- size
   if object then
     for index = 1, count do
@@ -366,45 +377,39 @@ local function json_container(data, kind)
     end
   end
   for index = 1, count do
-    items[index] = json_entry(data, base, large)
-    if object then
-      items[index] = quote(keys[index]) .. ': ' .. items[index]
-    end
+    result[object and keys[index] or index] = json_entry(data, base, large)
   end
-  if object then
-    return '{' .. table.concat(items, ', ') .. '}'
-  end
-  return '[' .. table.concat(items, ', ') .. ']'
+  return result
 end
 
 json_value = function (data, kind)
   if kind <= J.LARGE_ARRAY then
     return json_container(data, kind)
   elseif kind == J.LITERAL then
-    return LITERALS[data:u8()] or 'null'
+    return literal(data:u8())
   elseif kind == J.INT16 then
-    return integer_text(data:int(2))
+    return data:int(2)
   elseif kind == J.UINT16 then
-    return integer_text(data:u16())
+    return data:u16()
   elseif kind == J.INT32 then
-    return integer_text(data:int(4))
+    return data:int(4)
   elseif kind == J.UINT32 then
-    return integer_text(data:u32())
+    return data:u32()
   elseif kind == J.INT64 then
-    return integer_text(data:i64())
+    return data:i64()
   elseif kind == J.UINT64 then
-    return integer_text(data:u64())
+    return data:u64()
   elseif kind == J.DOUBLE then
-    return double_text(data:double())
+    return data:double()
   elseif kind == J.STRING then
-    return quote(data:bytes(json_varlen(data)))
+    return data:bytes(json_varlen(data))
   end
   protocol.fatal('binary JSON value of type %d (opaque: DECIMAL, dates inside JSON) is not supported', kind)
 end
 
-local function json(raw)
+local function binary_json(raw)
   if #raw == 0 then
-    return 'null'
+    return NULL
   end
   local data = protocol.reader(raw)
   return json_value(data, data:u8())
@@ -427,6 +432,9 @@ local function finish(column, value)
   end
   if column.kind == 'uuid' then
     return uuid_row(value)
+  end
+  if column.kind == 'json' then
+    return json.decode(value)
   end
   return value
 end
@@ -490,15 +498,11 @@ local function decode(data, column, type, info)
     return instant(column, value, fraction(data, info))
   elseif type == T.TIME then
     value = data:int(3)
-    local sign = value < 0 and '-' or ''
+    local negative = value < 0
     value = math.abs(value)
-    return format('%s%02d:%02d:%02d', sign, math.floor(value / 10000), math.floor(value / 100) % 100, value % 100)
+    return duration(column, negative, math.floor(value / 10000), math.floor(value / 100) % 100, value % 100, 0)
   elseif type == T.TIME2 then
-    value = data:be(3) - 0x800000
-    fraction(data, info)
-    local sign = value < 0 and '-' or ''
-    value = math.abs(value)
-    return format('%s%02d:%02d:%02d', sign, math.floor(value / 0x1000) % 0x400, math.floor(value / 64) % 64, value % 64)
+    return duration(column, time2(data, info))
   elseif type == T.VARCHAR or type == T.VAR_STRING then
     return finish(column, length_prefixed(data, info > 255 and 2 or 1))
   elseif type == T.BLOB or type == T.GEOMETRY then
@@ -523,7 +527,7 @@ local function decode(data, column, type, info)
     end
     return finish(column, length_prefixed(data, length > 255 and 2 or 1))
   elseif type == T.JSON then
-    return json(length_prefixed(data, info))
+    return binary_json(length_prefixed(data, info))
   elseif type == T.NULL then
     return NULL
   end

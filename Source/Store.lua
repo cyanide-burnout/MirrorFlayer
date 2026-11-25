@@ -326,12 +326,9 @@ Position.__index = Position
 
 local NUMERIC = { unsigned = true, integer = true, number = true }
 
--- Key of the Python replicator, which kept [0, gtid, 0] in ReplicatorPositions
-local LEGACY = 0
-
--- Opens the position space, created like Registry creates ReplicatorPositions
--- when missing. key is a stable number or string of this replicator, the
--- replica server id by default; the tuple is { key, gtid_state, event_time }.
+-- Opens the position space, created when missing with a key of the type of
+-- key. key is a stable number or string of this replicator, the replica server
+-- id by default; the tuple is { key, position, event_time }.
 local function position(space_name, key, name)
   local space = box.space[space_name]
   if space == nil then
@@ -346,42 +343,19 @@ local function position(space_name, key, name)
   if (part == 'string' and type(key) ~= 'string') or (NUMERIC[part] and type(key) ~= 'number') then
     protocol.fatal('position space %s has a %s key, the key %s does not fit it', space_name, part, tostring(key))
   end
-  if key == LEGACY then
-    protocol.fatal('position key 0 belongs to the Python replicator, choose another one')
-  end
   return setmetatable({ space = space, key = key, name = name }, Position)
 end
 
--- A GTID state of MariaDB (0-1-100,1-2-5) or a GTID set of MySQL (uuid:1-5:7),
--- not the binlog file name the C++ replicatord kept under the same key
-local function gtid(value)
-  return type(value) == 'string' and
-    (string.match(value, '^%d+%-%d+%-%d+[%d%-,%s]*$') ~= nil or
-     string.match(value, '^%x+%-%x+%-%x+%-%x+%-%x+:[%x%-:,%s]*$') ~= nil)
-end
-
--- Position of the Python replicator: key 0 in this space or in ReplicatorPositions
-function Position:legacy()
-  for _, space in ipairs({ self.space, box.space.ReplicatorPositions }) do
-    local status, tuple = pcall(space.get, space, LEGACY)
-    if status and tuple ~= nil and gtid(tuple[2]) then
-      log.info('MirrorFlayer[%s]: continuing from the position of the Python replicator %s', self.name, tuple[2])
-      return tuple[2]
-    end
-  end
-  return nil
-end
-
--- Returns the stored GTID state or nil
+-- Returns the stored position or nil
 function Position:get()
   local tuple = self.space:get(self.key)
   if tuple ~= nil and type(tuple[2]) == 'string' then
     return tuple[2]
   end
-  return self:legacy()
+  return nil
 end
 
--- Stores the GTID state; call inside the transaction of the applied changes
+-- Stores the position; call inside the transaction of the applied changes
 function Position:put(state, time)
   self.space:replace({ self.key, state, time or 0 })
 end

@@ -88,8 +88,7 @@ local function new(config)
   end
   check(type(options.position) == 'string', 'config.position must be a space name')
   check(type(options.name) == 'string', 'config.name must be a string')
-  check(options.datetime == 'datetime' or options.datetime == 'number' or options.datetime == 'string',
-    "config.datetime must be 'datetime', 'number' or 'string'")
+  check(options.datetime == 'datetime' or options.datetime == 'number', "config.datetime must be 'datetime' or 'number'")
   if options.tls == true then
     options.tls = { verify = 'none' }
   elseif type(options.tls) == 'table' then
@@ -176,6 +175,24 @@ local function describe(connection, source, mode)
   local columns = {}
   for index, row in ipairs(rows) do
     columns[index] = column.describe(row[1], row[2], row[3], mode)
+  end
+  if connection.mariadb then
+    -- JSON of MariaDB is LONGTEXT with a json_valid() check
+    local _, checks = connection:query(string.format(
+      'SELECT CHECK_CLAUSE FROM information_schema.CHECK_CONSTRAINTS WHERE CONSTRAINT_SCHEMA = %s AND TABLE_NAME = %s',
+      protocol.literal(source.database), protocol.literal(source.table)))
+    local json = {}
+    for _, check in ipairs(checks) do
+      local name = string.match(check[1], '^json_valid%(`(.-)`%)$')
+      if name ~= nil then
+        json[name] = true
+      end
+    end
+    for _, item in ipairs(columns) do
+      if json[item.name] and item.kind == 'string' then
+        item.kind = 'json'
+      end
+    end
   end
   for _, target in ipairs(source.targets) do
     target:bind(columns)

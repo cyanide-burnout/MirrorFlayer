@@ -4,7 +4,7 @@
 --   load    full load, values of all types, INSERT/UPDATE/DELETE over the stream
 --   resume  restart continues from the stored GTID without a full load
 --   purge   the position is purged from the binlog: error 1236, full reload
---   legacy  a fresh instance continues from the Python position [0, gtid, 0]
+--   late    a fresh instance started before its space exists
 
 local ffi       = require('ffi')
 local fiber     = require('fiber')
@@ -55,6 +55,25 @@ local function encode(value)
   return msgpack.encode(value)
 end
 
+-- Equal values; maps compare by content, since the order of their keys in
+-- MsgPack depends on how the Lua table was built
+local function same(left, right)
+  if type(left) == 'table' and type(right) == 'table' then
+    for key, value in pairs(left) do
+      if not same(value, right[key]) then
+        return false
+      end
+    end
+    for key in pairs(right) do
+      if left[key] == nil then
+        return false
+      end
+    end
+    return true
+  end
+  return encode(left) == encode(right)
+end
+
 local sql = protocol.connect({ host = HOST, port = 3306, user = 'root', password = 'root', timeout = 30 })
 
 local function exec(...)
@@ -92,6 +111,11 @@ end
 
 -- Schema ---------------------------------------------------------------------
 
+-- A duration of TIME, expected as the datetime mode makes it
+local function D(negative, hours, minutes, seconds, usec)
+  return { duration = true, negative = negative, hours = hours, minutes = minutes, seconds = seconds, usec = usec }
+end
+
 -- A moment in UTC, expected as the datetime mode makes it
 local function M(year, month, day, hour, minute, second, usec, date)
   return { moment = true, year = year, month = month, day = day, hour = hour, minute = minute,
@@ -99,15 +123,16 @@ local function M(year, month, day, hour, minute, second, usec, date)
 end
 
 local function expect(value, mode)
+  if type(value) == 'table' and value.duration then
+    local sign = value.negative and -1 or 1
+    if mode == 'number' then
+      return sign * (value.hours * 3600 + value.minutes * 60 + value.seconds + value.usec / 1e6)
+    end
+    return datetime.interval.new({ hour = sign * value.hours, min = sign * value.minutes, sec = sign * value.seconds,
+      nsec = sign * value.usec * 1000 })
+  end
   if type(value) ~= 'table' or not value.moment then
     return value
-  end
-  if mode == 'string' then
-    if value.date then
-      return string.format('%04d-%02d-%02d', value.year, value.month, value.day)
-    end
-    return string.format('%04d-%02d-%02d %02d:%02d:%02d', value.year, value.month, value.day,
-      value.hour, value.minute, value.second)
   end
   local moment = datetime.new({ year = value.year, month = value.month, day = value.day, hour = value.hour,
     min = value.minute, sec = value.second, nsec = value.usec * 1000, tzoffset = 0 })
@@ -147,8 +172,8 @@ local TYPES = {
   { 'Ts', 'TIMESTAMP NULL', "'2024-03-01 01:02:03'", M(2024, 3, 1, 1, 2, 3, 0) },
   { 'Ts3', 'TIMESTAMP(3) NULL', "'2024-03-01 01:02:03.456'", M(2024, 3, 1, 1, 2, 3, 456000) },
   { 'D', 'DATE', "'2024-12-31'", M(2024, 12, 31, 0, 0, 0, 0, true) },
-  { 'T', 'TIME', "'-12:34:56'", '-12:34:56' },
-  { 'T3', 'TIME(3)', "'838:59:58.500'", '838:59:58' },
+  { 'T', 'TIME', "'-12:34:56'", D(true, 12, 34, 56, 0) },
+  { 'T3', 'TIME(3)', "'838:59:58.500'", D(false, 838, 59, 58, 500000) },
   { 'Y', 'YEAR', '2024', 2024 },
   { 'Ch', 'CHAR(10)', "'abc'", 'abc' },
   { 'Vc', 'VARCHAR(300)', "'Привет'", 'Привет' },
@@ -160,7 +185,7 @@ local TYPES = {
   { 'En', "ENUM('red','green','blue')", "'green'", 'green' },
   { 'St', "SET('a','b','c')", "'a,c'", 'a,c' },
   { 'Js', 'JSON', [['{"a": "x\\"y", "b": [true, false, null, 1.5, -3, 70000], "c": {}}']],
-    '{"a": "x\\"y", "b": [true, false, null, 1.5, -3, 70000], "c": {}}' }
+    { a = 'x"y', b = { true, false, box.NULL, 1.5, -3, 70000 }, c = setmetatable({}, { __serialize = 'map' }) } }
 }
 
 -- UUID of MariaDB, versions 1 and 4 kept with their groups reversed, 7 as it is
@@ -225,7 +250,7 @@ local function setup_spaces()
   for _, item in ipairs(TYPES) do
     table.insert(format, { name = item[1], type = 'any', is_nullable = true })
   end
-  for _, name in ipairs({ 'Types', 'TypesString', 'TypesNumber' }) do
+  for _, name in ipairs({ 'Types', 'TypesNumber' }) do
     box.schema.space.create(name, { if_not_exists = true, format = format })
     box.space[name]:create_index('ID', { if_not_exists = true, parts = { 1, 'unsigned' } })
   end
@@ -327,7 +352,7 @@ local function check_types(id, what, space, mode)
   local good = true
   for index, item in ipairs(TYPES) do
     local expected = expect(item[4], mode)
-    if encode(tuple[index + 1]) ~= encode(expected) then
+    if not same(tuple[index + 1], expected) then
       good = false
       ok(false, '%s: %s %d.%s is %s (%s), expected %s', what, space, id, item[1],
         tostring(tuple[index + 1]), type(tuple[index + 1]), tostring(expected))
@@ -338,7 +363,7 @@ end
 
 local function same_rows(left, right, what)
   local first, second = box.space.Types:get(left), box.space.Types:get(right)
-  ok(first ~= nil and second ~= nil and encode(first:transform(1, 1)) == encode(second:transform(1, 1)),
+  ok(first ~= nil and second ~= nil and same(first:transform(1, 1):totable(), second:transform(1, 1):totable()),
     '%s: Types rows %d and %d are identical', what, left, right)
 end
 
@@ -420,15 +445,15 @@ local function load()
   ok(type(stat.lag) == 'number' and type(stat.event_time) == 'number' and stat.event_time > 0,
     'stat: lag %s, event time %s', tostring(stat.lag), tostring(stat.event_time))
 
-  -- The other datetime modes, over the full load (rows 1-4) and the stream (row 5)
+  -- The number mode, over the full load (rows 1-4) and the stream (row 5)
   local others = {}
-  for key, mode in pairs({ [KEY + 1] = 'string', [KEY + 2] = 'number' }) do
+  for key, mode in pairs({ [KEY + 1] = 'number' }) do
     local other = MirrorFlayer.new({
       hosts = { HOST .. ':3306' }, user = 'replica', password = 'secret', server = key,
       name = 'Types' .. mode, datetime = mode, heartbeat = 1, retry = 1,
       tls = (TLS == 'on' and true) or (TLS == 'ca' and { ca = '/certs/ca.pem' }) or false
     })
-    other:map('Registry', 'Types', mode == 'string' and 'TypesString' or 'TypesNumber')
+    other:map('Registry', 'Types', 'TypesNumber')
     others[mode] = other:start()
     caught_up(other)
   end
@@ -437,9 +462,8 @@ local function load()
   check_types(5, 'stream', 'Types', 'datetime')
   for mode, other in pairs(others) do
     caught_up(other)
-    local space = mode == 'string' and 'TypesString' or 'TypesNumber'
-    check_types(1, 'load', space, mode)
-    check_types(5, 'stream', space, mode)
+    check_types(1, 'load', 'TypesNumber', mode)
+    check_types(5, 'stream', 'TypesNumber', mode)
     other:stop()
   end
   replica:stop()
@@ -495,12 +519,7 @@ local function purge()
   replica:stop()
 end
 
-local function legacy()
-  box.schema.space.create('ReplicatorPositions', { if_not_exists = true })
-  box.space.ReplicatorPositions:create_index('ID', { if_not_exists = true, unique = true, parts = { 1, 'unsigned' } })
-  local state = gtid()
-  box.space.ReplicatorPositions:replace({ 0, state, 0 })
-
+local function late()
   -- Started before its space exists, as when a later plug-in makes it
   local replica = replicator(true)
   wait(function () return string.find(tostring(replica:stat().error), 'does not exist', 1, true) ~= nil end, 'a missing space')
@@ -509,12 +528,11 @@ local function legacy()
   box.space.GlobalLocations:create_index('ID', { if_not_exists = true, parts = { 1, 'unsigned' } })
   exec("INSERT INTO Registry.Locations (ID, Node, Kind, Modified) VALUES (600, 8, 'L', '2026-12-12 12:12:12')")
   local target = caught_up(replica)
-  ok(replica:stat().resyncs == 0, 'continued from the Python position without a full load')
-  ok(box.space.GlobalLocations:count() == 1 and box.space.GlobalLocations:get(600) ~= nil,
-    'only the new row arrived (%d rows)', box.space.GlobalLocations:count())
+  ok(replica:stat().resyncs == 1, 'a fresh instance makes one full load')
+  locations_equal('late')
+  ok(box.space.GlobalLocations:get(600) ~= nil, 'the row inserted meanwhile is there')
   stored_position(replica, KEY, target)
-  ok(box.space.ReplicatorPositions:get(KEY)[3] > 0, 'event time stored next to the GTID')
-  ok(encode(box.space.ReplicatorPositions:get(0)) == encode({ 0, state, 0 }), 'the Python position is left as it was')
+  ok(box.space.ReplicatorPositions:get(KEY)[3] > 0, 'event time stored next to the position')
   -- Cancelled from outside, as on shutdown: no error, just stopped
   replica.fiber:cancel()
   wait(function () return replica:stat().status == 'stopped' end, 'stop after a cancel')
@@ -522,7 +540,7 @@ local function legacy()
   replica:stop()
 end
 
-local phases = { load = load, resume = resume, purge = purge, legacy = legacy }
+local phases = { load = load, resume = resume, purge = purge, late = late }
 
 local status, problem = pcall(phases[phase] or function () error('unknown phase ' .. tostring(phase), 0) end)
 if not status then

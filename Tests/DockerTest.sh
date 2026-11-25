@@ -51,7 +51,7 @@ cleanup() {
 
 cleanup
 trap cleanup EXIT INT TERM
-mkdir -p "$WORK/data" "$WORK/legacy" "$WORK/certs"
+mkdir -p "$WORK/data" "$WORK/late" "$WORK/certs"
 
 echo "building TLS.so"
 docker run --rm --name "$BUILD" -v "$SOURCE:/src" -w /src --entrypoint sh "$TARANTOOL_IMAGE" -c \
@@ -94,5 +94,5 @@ docker run --rm --entrypoint tarantool "$TARANTOOL_IMAGE" --version | head -1
 phase load data
 phase resume data
 phase purge data
-phase legacy legacy
+phase late late
 echo "all phases passed ($SERVER_IMAGE, TLS $TLS)"
