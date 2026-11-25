@@ -44,7 +44,7 @@ case "$SERVER" in
 esac
 
 cleanup() {
-  docker rm -f "$DATABASE" "$TARANTOOL" "$BUILD" >/dev/null 2>&1 || true
+  docker rm -f -v "$DATABASE" "$TARANTOOL" "$BUILD" >/dev/null 2>&1 || true
   docker network rm "$NETWORK" >/dev/null 2>&1 || true
   rm -rf "$WORK"
 }
