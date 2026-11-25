@@ -1,14 +1,20 @@
 -- Column values: one conversion table for the text result set of the initial
 -- load and for binlog row images, so both paths give the same values.
 --
--- Values match the Python replicator: integers are numbers (uint64_t/int64_t
--- cdata above 2^53), DATETIME and TIMESTAMP are 'YYYY-MM-DD HH:MM:SS'
--- strings in UTC without fractions, zero dates and NULL are box.NULL, binary
--- strings are varbinary (MP_BIN) where Tarantool has it.
+-- Integers are numbers (uint64_t/int64_t cdata above 2^53), zero dates and
+-- NULL are box.NULL, binary strings are varbinary (MP_BIN) where Tarantool
+-- has it, UUID is uuid of Tarantool. DATETIME, TIMESTAMP and DATE follow the
+-- datetime mode of the replicator, all in UTC:
+--   'datetime'  datetime of Tarantool with fractions (the default)
+--   'number'    seconds since the Unix epoch with fractions
+--   'string'    'YYYY-MM-DD HH:MM:SS' / 'YYYY-MM-DD' without fractions, as the
+--               Python replicator wrote them
 
-local ffi     = require('ffi')
-local bit     = require('bit')
-local decimal = require('decimal')
+local ffi      = require('ffi')
+local bit      = require('bit')
+local uuid     = require('uuid')
+local decimal  = require('decimal')
+local datetime = require('datetime')
 
 local protocol = require('MirrorFlayer.Protocol')
 
@@ -54,7 +60,7 @@ local KINDS = {
   mediumtext = 'string', longtext = 'string', json = 'string',
   binary = 'bytes', varbinary = 'bytes', tinyblob = 'bytes', blob = 'bytes',
   mediumblob = 'bytes', longblob = 'bytes',
-  bit = 'bit', enum = 'enum', set = 'set'
+  bit = 'bit', enum = 'enum', set = 'set', uuid = 'uuid'
 }
 
 -- Values -----------------------------------------------------------------------
@@ -75,33 +81,50 @@ local function float(value)
   return tonumber(ffi.new('float', value))
 end
 
--- Strips fractions; zero dates become NULL
-local function temporal(text)
-  if sub(text, 1, 10) == '0000-00-00' then
-    return NULL
-  end
-  return sub(text, 1, 19)
-end
-
-local function date(year, month, day)
+-- A moment of a DATETIME, TIMESTAMP or DATE column in UTC, as the datetime
+-- mode of the column wants it; zero dates become NULL
+local function moment(column, year, month, day, hour, minute, second, usec)
   if year == 0 and month == 0 and day == 0 then
     return NULL
   end
-  return format('%04d-%02d-%02d', year, month, day)
+  if column.datetime == 'string' then
+    if column.kind == 'date' then
+      return format('%04d-%02d-%02d', year, month, day)
+    end
+    return format('%04d-%02d-%02d %02d:%02d:%02d', year, month, day, hour, minute, second)
+  end
+  local value = datetime.new({ year = year, month = month, day = day, hour = hour, min = minute,
+    sec = second, nsec = usec * 1000, tzoffset = 0 })
+  if column.datetime == 'number' then
+    return value.epoch + usec / 1e6
+  end
+  return value
 end
 
-local function datetime(year, month, day, hour, minute, second)
-  if year == 0 and month == 0 and day == 0 then
+-- The same for seconds since the Unix epoch (TIMESTAMP in the binlog)
+local function instant(column, seconds, usec)
+  if seconds == 0 and usec == 0 then
     return NULL
   end
-  return format('%04d-%02d-%02d %02d:%02d:%02d', year, month, day, hour, minute, second)
+  if column.datetime == 'string' then
+    return os.date('!%Y-%m-%d %H:%M:%S', seconds)
+  end
+  if column.datetime == 'number' then
+    return seconds + usec / 1e6
+  end
+  return datetime.new({ timestamp = seconds, nsec = usec * 1000, tzoffset = 0 })
 end
 
-local function epoch(seconds)
-  if seconds == 0 then
-    return NULL
+-- Parses 'YYYY-MM-DD[ HH:MM:SS[.ffffff]]' of the text protocol
+local function temporal(column, text)
+  local year, month, day, hour, minute, second, fraction =
+    string.match(text, '^(%d+)-(%d+)-(%d+)[ T]?(%d*):?(%d*):?(%d*)%.?(%d*)')
+  if year == nil then
+    error(protocol.failure('bad date ' .. text), 0)
   end
-  return os.date('!%Y-%m-%d %H:%M:%S', seconds)
+  local usec = fraction ~= '' and tonumber(sub(fraction .. '000000', 1, 6)) or 0
+  return moment(column, tonumber(year), tonumber(month), tonumber(day),
+    tonumber(hour) or 0, tonumber(minute) or 0, tonumber(second) or 0, usec)
 end
 
 local function bits(data)
@@ -126,19 +149,20 @@ end
 -- Text result set ------------------------------------------------------------
 
 local TEXT = {
-  integer = integer,
-  float = function (text) return float(tonumber(text)) end,
-  double = tonumber,
-  decimal = decimal.new,
-  date = temporal,
+  integer  = function (column, text) return integer(text) end,
+  float    = function (column, text) return float(tonumber(text)) end,
+  double   = function (column, text) return tonumber(text) end,
+  decimal  = function (column, text) return decimal.new(text) end,
+  date     = temporal,
   datetime = temporal,
-  time = function (text) return string.match(text, '^%-?%d+:%d%d:%d%d') or text end,
-  year = tonumber,
-  string = function (text) return text end,
-  bytes = binary,
-  bit = bits,
-  enum = function (text) return text end,
-  set = function (text) return text end
+  time     = function (column, text) return string.match(text, '^%-?%d+:%d%d:%d%d') or text end,
+  year     = function (column, text) return tonumber(text) end,
+  string   = function (column, text) return text end,
+  bytes    = function (column, text) return binary(text) end,
+  bit      = function (column, text) return bits(text) end,
+  enum     = function (column, text) return text end,
+  set      = function (column, text) return text end,
+  uuid     = function (column, text) return uuid.fromstr(text) end
 }
 
 -- Converts a text value of the column; text is a string or box.NULL
@@ -146,7 +170,7 @@ local function text(column, value)
   if value == NULL then
     return NULL
   end
-  return TEXT[column.kind](value)
+  return TEXT[column.kind](column, value)
 end
 
 -- Binlog row image -----------------------------------------------------------
@@ -212,8 +236,13 @@ local function newdecimal(data, precision, scale)
   return decimal.new(table.concat(parts))
 end
 
+-- Microseconds of DATETIME2, TIMESTAMP2 and TIME2: (precision + 1) / 2 bytes
 local function fraction(data, precision)
-  data:skip(math.floor((precision + 1) / 2))
+  local size = math.floor((precision + 1) / 2)
+  if size == 0 then
+    return 0
+  end
+  return data:be(size) * 10 ^ (6 - 2 * size)
 end
 
 local function length_prefixed(data, size)
@@ -381,9 +410,23 @@ local function json(raw)
   return json_value(data, data:u8())
 end
 
+-- MariaDB keeps a UUID of version 1-5 and the RFC 4122 variant in its row
+-- with the five groups in reverse order, others as they are
+local function uuid_row(value)
+  local swapped = sub(value, 13, 16) .. sub(value, 11, 12) .. sub(value, 9, 10) .. sub(value, 7, 8) .. sub(value, 1, 6)
+  local version = math.floor(byte(swapped, 7) / 16)
+  if version >= 1 and version <= 5 and band(byte(swapped, 9), 0xc0) == 0x80 then
+    value = swapped
+  end
+  return uuid.frombin(value)
+end
+
 local function finish(column, value)
   if column.kind == 'bytes' then
     return binary(value)
+  end
+  if column.kind == 'uuid' then
+    return uuid_row(value)
   end
   return value
 end
@@ -424,28 +467,27 @@ local function decode(data, column, type, info)
     return value == 0 and 0 or value + 1900
   elseif type == T.DATE or type == T.NEWDATE then
     value = data:u24()
-    return date(math.floor(value / 512), math.floor(value / 32) % 16, value % 32)
+    return moment(column, math.floor(value / 512), math.floor(value / 32) % 16, value % 32, 0, 0, 0, 0)
   elseif type == T.DATETIME then
     value = data:u64()
     if value == 0 then
       return NULL
     end
     local day, time = math.floor(value / 1000000), value % 1000000
-    return datetime(math.floor(day / 10000), math.floor(day / 100) % 100, day % 100,
-      math.floor(time / 10000), math.floor(time / 100) % 100, time % 100)
+    return moment(column, math.floor(day / 10000), math.floor(day / 100) % 100, day % 100,
+      math.floor(time / 10000), math.floor(time / 100) % 100, time % 100, 0)
   elseif type == T.DATETIME2 then
     value = data:be(5) - 0x8000000000
-    fraction(data, info)
+    local usec = fraction(data, info)
     local ymd, hms = math.floor(value / 0x20000), value % 0x20000
     local ym = math.floor(ymd / 32)
-    return datetime(math.floor(ym / 13), ym % 13, ymd % 32,
-      math.floor(hms / 0x1000), math.floor(hms / 64) % 64, hms % 64)
+    return moment(column, math.floor(ym / 13), ym % 13, ymd % 32,
+      math.floor(hms / 0x1000), math.floor(hms / 64) % 64, hms % 64, usec)
   elseif type == T.TIMESTAMP then
-    return epoch(data:u32())
+    return instant(column, data:u32(), 0)
   elseif type == T.TIMESTAMP2 then
     value = data:be(4)
-    fraction(data, info)
-    return epoch(value)
+    return instant(column, value, fraction(data, info))
   elseif type == T.TIME then
     value = data:int(3)
     local sign = value < 0 and '-' or ''
@@ -530,15 +572,16 @@ local function values(definition)
 end
 
 -- Builds a column from a row of information_schema.COLUMNS:
--- COLUMN_NAME, DATA_TYPE, COLUMN_TYPE
-local function describe(name, data_type, column_type)
+-- COLUMN_NAME, DATA_TYPE, COLUMN_TYPE; mode is the datetime mode
+local function describe(name, data_type, column_type, mode)
   local kind   = KINDS[string.lower(data_type)]
   local column = {
-    name = name,
-    type = string.lower(data_type),
-    kind = kind or 'bytes',
-    unsigned = string.find(string.lower(column_type), 'unsigned', 1, true) ~= nil,
-    supported = kind ~= nil
+    name      = name,
+    type      = string.lower(data_type),
+    kind      = kind or 'bytes',
+    unsigned  = string.find(string.lower(column_type), 'unsigned', 1, true) ~= nil,
+    supported = kind ~= nil,
+    datetime  = mode or 'datetime'
   }
   if kind == 'enum' or kind == 'set' then
     column.values = values(column_type)

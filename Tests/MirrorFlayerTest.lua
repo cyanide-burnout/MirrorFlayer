@@ -10,7 +10,9 @@ local ffi       = require('ffi')
 local fiber     = require('fiber')
 local log       = require('log')
 local msgpack   = require('msgpack')
+local uuid      = require('uuid')
 local decimal   = require('decimal')
+local datetime  = require('datetime')
 local varbinary = require('varbinary')
 
 local MirrorFlayer = require('MirrorFlayer')
@@ -90,6 +92,41 @@ end
 
 -- Schema ---------------------------------------------------------------------
 
+-- A moment in UTC, expected as the datetime mode makes it
+local function M(year, month, day, hour, minute, second, usec, date)
+  return { moment = true, year = year, month = month, day = day, hour = hour, minute = minute,
+    second = second, usec = usec, date = date }
+end
+
+local function expect(value, mode)
+  if type(value) ~= 'table' or not value.moment then
+    return value
+  end
+  if mode == 'string' then
+    if value.date then
+      return string.format('%04d-%02d-%02d', value.year, value.month, value.day)
+    end
+    return string.format('%04d-%02d-%02d %02d:%02d:%02d', value.year, value.month, value.day,
+      value.hour, value.minute, value.second)
+  end
+  local moment = datetime.new({ year = value.year, month = value.month, day = value.day, hour = value.hour,
+    min = value.minute, sec = value.second, nsec = value.usec * 1000, tzoffset = 0 })
+  if mode == 'number' then
+    return moment.epoch + value.usec / 1e6
+  end
+  return moment
+end
+
+-- 'YYYY-MM-DD HH:MM:SS' of the text protocol as the datetime mode makes it
+local function moment_of(text, mode)
+  if text == box.NULL then
+    return box.NULL
+  end
+  local year, month, day, hour, minute, second = string.match(text, '^(%d+)-(%d+)-(%d+) (%d+):(%d+):(%d+)')
+  return expect(M(tonumber(year), tonumber(month), tonumber(day), tonumber(hour), tonumber(minute),
+    tonumber(second), 0), mode)
+end
+
 local TYPES = {
   { 'TinyS', 'TINYINT', '-5', -5 },
   { 'TinyU', 'TINYINT UNSIGNED', '250', 250 },
@@ -105,11 +142,11 @@ local TYPES = {
   { 'Dec1', 'DECIMAL(10,2)', '-12.30', decimal.new('-12.30') },
   { 'Dec2', 'DECIMAL(30,12)', '123456789012345678.123456789012', decimal.new('123456789012345678.123456789012') },
   { 'Dec3', 'DECIMAL(5,3)', '0.050', decimal.new('0.050') },
-  { 'Dt', 'DATETIME', "'2024-02-29 13:14:15'", '2024-02-29 13:14:15' },
-  { 'Dt6', 'DATETIME(6)', "'2024-02-29 13:14:15.123456'", '2024-02-29 13:14:15' },
-  { 'Ts', 'TIMESTAMP NULL', "'2024-03-01 01:02:03'", '2024-03-01 01:02:03' },
-  { 'Ts3', 'TIMESTAMP(3) NULL', "'2024-03-01 01:02:03.456'", '2024-03-01 01:02:03' },
-  { 'D', 'DATE', "'2024-12-31'", '2024-12-31' },
+  { 'Dt', 'DATETIME', "'2024-02-29 13:14:15'", M(2024, 2, 29, 13, 14, 15, 0) },
+  { 'Dt6', 'DATETIME(6)', "'2024-02-29 13:14:15.123456'", M(2024, 2, 29, 13, 14, 15, 123456) },
+  { 'Ts', 'TIMESTAMP NULL', "'2024-03-01 01:02:03'", M(2024, 3, 1, 1, 2, 3, 0) },
+  { 'Ts3', 'TIMESTAMP(3) NULL', "'2024-03-01 01:02:03.456'", M(2024, 3, 1, 1, 2, 3, 456000) },
+  { 'D', 'DATE', "'2024-12-31'", M(2024, 12, 31, 0, 0, 0, 0, true) },
   { 'T', 'TIME', "'-12:34:56'", '-12:34:56' },
   { 'T3', 'TIME(3)', "'838:59:58.500'", '838:59:58' },
   { 'Y', 'YEAR', '2024', 2024 },
@@ -125,6 +162,14 @@ local TYPES = {
   { 'Js', 'JSON', [['{"a": "x\\"y", "b": [true, false, null, 1.5, -3, 70000], "c": {}}']],
     '{"a": "x\\"y", "b": [true, false, null, 1.5, -3, 70000], "c": {}}' }
 }
+
+-- UUID of MariaDB, versions 1 and 4 kept with their groups reversed, 7 as it is
+if SERVER == 'mariadb' then
+  for index, text in ipairs({ '6ccd780c-baba-1026-9564-5b8c656024db', 'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+                             '01890a5d-ac96-774b-bcce-b302099a8057' }) do
+    table.insert(TYPES, { 'U' .. index, 'UUID', "'" .. text .. "'", uuid.fromstr(text) })
+  end
+end
 
 local function type_columns()
   local names = {}
@@ -180,8 +225,10 @@ local function setup_spaces()
   for _, item in ipairs(TYPES) do
     table.insert(format, { name = item[1], type = 'any', is_nullable = true })
   end
-  box.schema.space.create('Types', { if_not_exists = true, format = format })
-  box.space.Types:create_index('ID', { if_not_exists = true, parts = { 1, 'unsigned' } })
+  for _, name in ipairs({ 'Types', 'TypesString', 'TypesNumber' }) do
+    box.schema.space.create(name, { if_not_exists = true, format = format })
+    box.space[name]:create_index('ID', { if_not_exists = true, parts = { 1, 'unsigned' } })
+  end
 end
 
 -- Replicator -----------------------------------------------------------------
@@ -261,7 +308,7 @@ local function locations_equal(what)
     return
   end
   for index, row in ipairs(rows) do
-    local expected = { number(row[1]), number(row[2]), row[3], number(row[4]), number(row[5]), row[6] }
+    local expected = { number(row[1]), number(row[2]), row[3], number(row[4]), number(row[5]), moment_of(row[6]) }
     if encode(expected) ~= encode(tuples[index]) then
       ok(false, '%s: row %s differs: %s vs %s', what, row[1], require('json').encode(expected), tostring(tuples[index]))
       return
@@ -270,21 +317,23 @@ local function locations_equal(what)
   ok(true, '%s: GlobalLocations equals Locations (%d rows)', what, #rows)
 end
 
-local function check_types(id, what)
-  local tuple = box.space.Types:get(id)
+local function check_types(id, what, space, mode)
+  space = space or 'Types'
+  local tuple = box.space[space]:get(id)
   if tuple == nil then
-    ok(false, '%s: Types row %d is missing', what, id)
+    ok(false, '%s: %s row %d is missing', what, space, id)
     return
   end
   local good = true
   for index, item in ipairs(TYPES) do
-    if encode(tuple[index + 1]) ~= encode(item[4]) then
+    local expected = expect(item[4], mode)
+    if encode(tuple[index + 1]) ~= encode(expected) then
       good = false
-      ok(false, '%s: Types %d.%s is %s (%s), expected %s', what, id, item[1],
-        tostring(tuple[index + 1]), type(tuple[index + 1]), tostring(item[4]))
+      ok(false, '%s: %s %d.%s is %s (%s), expected %s', what, space, id, item[1],
+        tostring(tuple[index + 1]), type(tuple[index + 1]), tostring(expected))
     end
   end
-  ok(good, '%s: all %d typed values of row %d', what, #TYPES, id)
+  ok(good, '%s: all %d typed values of %s row %d', what, #TYPES, space, id)
 end
 
 local function same_rows(left, right, what)
@@ -370,6 +419,29 @@ local function load()
   local stat = replica:stat()
   ok(type(stat.lag) == 'number' and type(stat.event_time) == 'number' and stat.event_time > 0,
     'stat: lag %s, event time %s', tostring(stat.lag), tostring(stat.event_time))
+
+  -- The other datetime modes, over the full load (rows 1-4) and the stream (row 5)
+  local others = {}
+  for key, mode in pairs({ [KEY + 1] = 'string', [KEY + 2] = 'number' }) do
+    local other = MirrorFlayer.new({
+      hosts = { HOST .. ':3306' }, user = 'replica', password = 'secret', server = key,
+      name = 'Types' .. mode, datetime = mode, heartbeat = 1, retry = 1,
+      tls = (TLS == 'on' and true) or (TLS == 'ca' and { ca = '/certs/ca.pem' }) or false
+    })
+    other:map('Registry', 'Types', mode == 'string' and 'TypesString' or 'TypesNumber')
+    others[mode] = other:start()
+    caught_up(other)
+  end
+  exec('INSERT INTO Registry.Types (ID, ' .. type_columns() .. ') SELECT 5, ' .. type_columns() .. ' FROM Registry.Types WHERE ID = 1')
+  caught_up(replica)
+  check_types(5, 'stream', 'Types', 'datetime')
+  for mode, other in pairs(others) do
+    caught_up(other)
+    local space = mode == 'string' and 'TypesString' or 'TypesNumber'
+    check_types(1, 'load', space, mode)
+    check_types(5, 'stream', space, mode)
+    other:stop()
+  end
   replica:stop()
 end
 
