@@ -64,8 +64,8 @@ local function same(left, right)
         return false
       end
     end
-    for key in pairs(right) do
-      if left[key] == nil then
+    for key, value in pairs(right) do
+      if not same(left[key], value) then
         return false
       end
     end
