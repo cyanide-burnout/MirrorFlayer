@@ -122,7 +122,10 @@ local function M(year, month, day, hour, minute, second, usec, date)
     second = second, usec = usec, date = date }
 end
 
-local function expect(value, mode)
+local function expect(value, mode, json)
+  if type(value) == 'table' and value.json then
+    return json == 'string' and value.text or value.map
+  end
   if type(value) == 'table' and value.duration then
     local sign = value.negative and -1 or 1
     if mode == 'number' then
@@ -185,7 +188,8 @@ local TYPES = {
   { 'En', "ENUM('red','green','blue')", "'green'", 'green' },
   { 'St', "SET('a','b','c')", "'a,c'", 'a,c' },
   { 'Js', 'JSON', [['{"a": "x\\"y", "b": [true, false, null, 1.5, -3, 70000], "c": {}}']],
-    { a = 'x"y', b = { true, false, box.NULL, 1.5, -3, 70000 }, c = setmetatable({}, { __serialize = 'map' }) } }
+    { json = true, text = '{"a": "x\\"y", "b": [true, false, null, 1.5, -3, 70000], "c": {}}',
+      map = { a = 'x"y', b = { true, false, box.NULL, 1.5, -3, 70000 }, c = setmetatable({}, { __serialize = 'map' }) } } }
 }
 
 -- UUID of MariaDB, versions 1 and 4 kept with their groups reversed, 7 as it is
@@ -342,7 +346,7 @@ local function locations_equal(what)
   ok(true, '%s: GlobalLocations equals Locations (%d rows)', what, #rows)
 end
 
-local function check_types(id, what, space, mode)
+local function check_types(id, what, space, mode, json)
   space = space or 'Types'
   local tuple = box.space[space]:get(id)
   if tuple == nil then
@@ -351,7 +355,7 @@ local function check_types(id, what, space, mode)
   end
   local good = true
   for index, item in ipairs(TYPES) do
-    local expected = expect(item[4], mode)
+    local expected = expect(item[4], mode, json)
     if not same(tuple[index + 1], expected) then
       good = false
       ok(false, '%s: %s %d.%s is %s (%s), expected %s', what, space, id, item[1],
@@ -445,12 +449,12 @@ local function load()
   ok(type(stat.lag) == 'number' and type(stat.event_time) == 'number' and stat.event_time > 0,
     'stat: lag %s, event time %s', tostring(stat.lag), tostring(stat.event_time))
 
-  -- The number mode, over the full load (rows 1-4) and the stream (row 5)
+  -- The number and string modes, over the full load (rows 1-4) and the stream (row 5)
   local others = {}
   for key, mode in pairs({ [KEY + 1] = 'number' }) do
     local other = MirrorFlayer.new({
       hosts = { HOST .. ':3306' }, user = 'replica', password = 'secret', server = key,
-      name = 'Types' .. mode, datetime = mode, heartbeat = 1, retry = 1,
+      name = 'Types' .. mode, datetime = mode, json = 'string', heartbeat = 1, retry = 1,
       tls = (TLS == 'on' and true) or (TLS == 'ca' and { ca = '/certs/ca.pem' }) or false
     })
     other:map('Registry', 'Types', 'TypesNumber')
@@ -462,8 +466,8 @@ local function load()
   check_types(5, 'stream', 'Types', 'datetime')
   for mode, other in pairs(others) do
     caught_up(other)
-    check_types(1, 'load', 'TypesNumber', mode)
-    check_types(5, 'stream', 'TypesNumber', mode)
+    check_types(1, 'load', 'TypesNumber', mode, 'string')
+    check_types(5, 'stream', 'TypesNumber', mode, 'string')
     other:stop()
   end
   replica:stop()

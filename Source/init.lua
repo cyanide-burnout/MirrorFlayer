@@ -29,6 +29,7 @@ local DEFAULTS = {
   position = 'ReplicatorPositions',
   tls = false,
   datetime = 'datetime',
+  json = 'map',
   heartbeat = 10,
   timeout = 30,
   batch = 100,
@@ -89,6 +90,7 @@ local function new(config)
   check(type(options.position) == 'string', 'config.position must be a space name')
   check(type(options.name) == 'string', 'config.name must be a string')
   check(options.datetime == 'datetime' or options.datetime == 'number', "config.datetime must be 'datetime' or 'number'")
+  check(options.json == 'map' or options.json == 'string', "config.json must be 'map' or 'string'")
   if options.tls == true then
     options.tls = { verify = 'none' }
   elseif type(options.tls) == 'table' then
@@ -164,7 +166,7 @@ function Replica:connect(host, port)
 end
 
 -- Reads the columns of the source table and binds the targets to them
-local function describe(connection, source, mode)
+local function describe(connection, source, config)
   local _, rows = connection:query(string.format(
     'SELECT COLUMN_NAME, DATA_TYPE, COLUMN_TYPE FROM information_schema.COLUMNS ' ..
     'WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s ORDER BY ORDINAL_POSITION',
@@ -174,7 +176,7 @@ local function describe(connection, source, mode)
   end
   local columns = {}
   for index, row in ipairs(rows) do
-    columns[index] = column.describe(row[1], row[2], row[3], mode)
+    columns[index] = column.describe(row[1], row[2], row[3], config)
   end
   if connection.mariadb then
     -- JSON of MariaDB is LONGTEXT with a json_valid() check
@@ -203,7 +205,7 @@ end
 
 function Replica:refresh(source)
   local connection = self:connect(self.host, self.port)
-  local status, problem = pcall(describe, connection, source, self.config.datetime)
+  local status, problem = pcall(describe, connection, source, self.config)
   connection:close()
   if not status then
     error(problem, 0)
@@ -442,7 +444,7 @@ function Replica:session(host, port)
   self:say('info', 'connected to %s:%d, %s%s', host, port, connection.version, connection.secure and ', TLS' or '')
 
   for _, source in ipairs(self.order) do
-    describe(connection, source, self.config.datetime)
+    describe(connection, source, self.config)
   end
 
   local state = self.position:get()
