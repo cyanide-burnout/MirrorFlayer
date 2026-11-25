@@ -88,7 +88,7 @@ is aborted.
 
 ## Values
 
-One conversion table (`MirrorFlayer.Column`) serves both the snapshot of the
+One conversion table (`MirrorFlayer.MySQL.Column` over `MirrorFlayer.Column`) serves both the snapshot of the
 full load and the row images of the stream, so a row gives the same tuple
 either way. Every value gets its Tarantool type.
 
@@ -127,10 +127,11 @@ not listed (`INET4`, `INET6`, geometry) are refused when mapped.
 
 ## Build and install
 
-`Source/` holds the Lua modules; they are installed as
-`$(PREFIX)/share/tarantool/MirrorFlayer/`, which is what `require('MirrorFlayer')`
-finds. Only `init.lua` is lowercase: that is the file Lua looks for in a
-package directory. `Source/TLS.c` is `MirrorFlayer.TLS`, installed as
+`Source/` holds the engine and the shared Lua modules, `Source/MySQL/` the
+driver of MySQL and MariaDB; they are installed as
+`$(PREFIX)/share/tarantool/MirrorFlayer/` and `MirrorFlayer/MySQL/`, which is
+what `require('MirrorFlayer')` finds. Only `init.lua` is lowercase: that is the
+file Lua looks for in a package directory. `Source/TLS.c` is `MirrorFlayer.TLS`, installed as
 `$(PREFIX)/lib/<triplet>/tarantool/MirrorFlayer/TLS.so`; it needs the headers
 of `tarantool-dev` and `libssl-dev` and links the system OpenSSL.
 

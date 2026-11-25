@@ -5,7 +5,7 @@ local msgpack = require('msgpack')
 local key_def = require('key_def')
 local log     = require('log')
 
-local protocol = require('MirrorFlayer.Protocol')
+local errors = require('MirrorFlayer.Failure')
 
 local NULL = box.NULL
 
@@ -22,16 +22,16 @@ local function target(spec, columns)
     self.call = spec
     self.name = tostring(spec)
     if columns == nil then
-      protocol.fatal('a function target needs a column list')
+      errors.fatal('a function target needs a column list')
     end
   else
     local space = box.space[spec]
     if space == nil then
       -- Not fatal: the space may be made later, the replicator retries
-      error(protocol.failure(string.format('space %s does not exist yet', tostring(spec))), 0)
+      error(errors.failure(string.format('space %s does not exist yet', tostring(spec))), 0)
     end
     if space.index[0] == nil then
-      protocol.fatal('space %s has no primary index', spec)
+      errors.fatal('space %s has no primary index', spec)
     end
     self.space = space
     self.name = spec
@@ -41,14 +41,14 @@ local function target(spec, columns)
         columns[index] = field.name
       end
       if #columns == 0 then
-        protocol.fatal('space %s has no format, give the column list', spec)
+        errors.fatal('space %s has no format, give the column list', spec)
       end
     end
     self.parts = space.index[0].parts
     self.key = {}
     for index, part in ipairs(self.parts) do
       if type(part.fieldno) ~= 'number' or part.fieldno > #columns then
-        protocol.fatal('space %s: key part %d is not among the mapped columns', spec, index)
+        errors.fatal('space %s: key part %d is not among the mapped columns', spec, index)
       end
       self.key[index] = part.fieldno
     end
@@ -68,10 +68,10 @@ function Target:bind(columns)
   for index, name in ipairs(self.columns) do
     local position = positions[name]
     if position == nil then
-      protocol.fatal('target %s: column %s is missing in the source table', self.name, name)
+      errors.fatal('target %s: column %s is missing in the source table', self.name, name)
     end
     if not columns[position].supported then
-      protocol.fatal('target %s: column %s has unsupported type %s', self.name, name, columns[position].type)
+      errors.fatal('target %s: column %s has unsupported type %s', self.name, name, columns[position].type)
     end
     self.positions[index] = position
   end
@@ -337,11 +337,11 @@ local function position(space_name, key, name)
       parts = { 1, type(key) == 'number' and 'unsigned' or 'string' } })
   end
   if space.index[0] == nil then
-    protocol.fatal('position space %s has no primary index', space_name)
+    errors.fatal('position space %s has no primary index', space_name)
   end
   local part = space.index[0].parts[1].type
   if (part == 'string' and type(key) ~= 'string') or (NUMERIC[part] and type(key) ~= 'number') then
-    protocol.fatal('position space %s has a %s key, the key %s does not fit it', space_name, part, tostring(key))
+    errors.fatal('position space %s has a %s key, the key %s does not fit it', space_name, part, tostring(key))
   end
   return setmetatable({ space = space, key = key, name = name }, Position)
 end

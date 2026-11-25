@@ -3,7 +3,7 @@
 
 local bit = require('bit')
 
-local protocol = require('MirrorFlayer.Protocol')
+local protocol = require('MirrorFlayer.MySQL.Protocol')
 
 local COM_BINLOG_DUMP = 0x12
 

@@ -1,5 +1,7 @@
--- MirrorFlayer: replication of MySQL/MariaDB tables into Tarantool spaces
--- over the binlog replication protocol, in a fiber of Tarantool itself
+-- MirrorFlayer: replication of source tables into Tarantool spaces, in a
+-- fiber of Tarantool itself. The source is a driver: MirrorFlayer.MySQL
+-- (MySQL and MariaDB over the binlog). The engine keeps the fiber, hosts,
+-- retries, transactions, positions, statistics and metrics.
 --
 --   local MirrorFlayer = require('MirrorFlayer')
 --   local replica = MirrorFlayer.new({
@@ -13,18 +15,15 @@ local fiber = require('fiber')
 local clock = require('clock')
 local log   = require('log')
 
-local protocol = require('MirrorFlayer.Protocol')
-local column   = require('MirrorFlayer.Column')
-local binlog   = require('MirrorFlayer.BinLog')
-local mariadb  = require('MirrorFlayer.MariaDB')
-local mysql    = require('MirrorFlayer.MySQL')
-local store    = require('MirrorFlayer.Store')
+local store = require('MirrorFlayer.Store')
 
-local E = binlog.E
-
-local failure, fatal = protocol.failure, protocol.fatal
+-- Source drivers by config.type
+local DRIVERS = {
+  mysql = 'MirrorFlayer.MySQL'
+}
 
 local DEFAULTS = {
+  type = 'mysql',
   name = 'MirrorFlayer',
   position = 'ReplicatorPositions',
   tls = false,
@@ -36,24 +35,10 @@ local DEFAULTS = {
   retry = 5
 }
 
-local COMPRESSED = 'compressed binlog events are not supported, turn log_bin_compress off'
-
--- Events that stop the replicator
-local UNSUPPORTED = {
-  [E.QUERY_COMPRESSED] = COMPRESSED,
-  [E.WRITE_ROWS_COMPRESSED_V1] = COMPRESSED, [E.UPDATE_ROWS_COMPRESSED_V1] = COMPRESSED, [E.DELETE_ROWS_COMPRESSED_V1] = COMPRESSED,
-  [E.WRITE_ROWS_COMPRESSED] = COMPRESSED, [E.UPDATE_ROWS_COMPRESSED] = COMPRESSED, [E.DELETE_ROWS_COMPRESSED] = COMPRESSED,
-  [E.ANONYMOUS_GTID] = 'transaction without GTID: the source needs gtid_mode=ON',
-  [E.GTID_TAGGED] = 'tagged GTIDs are not supported',
-  [E.TRANSACTION_PAYLOAD] = 'compressed transactions are not supported, turn binlog_transaction_compression off',
-  [E.PARTIAL_UPDATE_ROWS] = 'partial JSON updates are not supported, binlog_row_value_options must be empty',
-  [E.XA_PREPARE] = 'XA transactions are not supported'
-}
-
 local Replica = {}
 Replica.__index = Replica
 
-local function address(text)
+local function address(text, default)
   local host, port = string.match(text, '^%[(.+)%]:(%d+)$')
   if host == nil then
     host, port = string.match(text, '^([^:]+):(%d+)$')
@@ -61,7 +46,7 @@ local function address(text)
   if host == nil then
     host = text
   end
-  return host, tonumber(port) or 3306
+  return host, tonumber(port) or default
 end
 
 local function check(condition, format, ...)
@@ -71,13 +56,15 @@ local function check(condition, format, ...)
 end
 
 -- Creates a replicator; the connection settings are checked by start().
--- config: hosts (array of 'host[:port]'), user, password, server (replica
--- server id), tls (false, true or { verify = 'none' | 'ca' | 'identity', ca,
--- cert, key }), public_key (PEM of the source for caching_sha2_password
--- without TLS, asked from the server when missing), position (space name), key (of the position, the
--- server id by default), name (in logs and metrics), heartbeat (seconds),
--- timeout (seconds), batch (rows per transaction of the full load), retry
--- (seconds between connection attempts)
+-- config: type ('mysql', the default), hosts (array of 'host[:port]'), user,
+-- password, server (replica server id of MySQL and MariaDB), tls (false, true
+-- or { verify = 'none' | 'ca' | 'identity', ca, cert, key }), public_key (PEM
+-- of the source for caching_sha2_password without TLS, asked from the server
+-- when missing), position (space name), key (of the position, the server id
+-- of MySQL by default), name (in logs and metrics), datetime ('datetime' or
+-- 'number'), json ('map' or 'string'), heartbeat (seconds), timeout
+-- (seconds), batch (rows per transaction), retry (seconds between connection
+-- attempts)
 local function new(config)
   check(type(config) == 'table', 'config must be a table')
   local options = {}
@@ -87,6 +74,8 @@ local function new(config)
   for key, value in pairs(config) do
     options[key] = value
   end
+  check(DRIVERS[options.type] ~= nil, "config.type must be 'mysql'")
+  local driver = require(DRIVERS[options.type])
   check(type(options.position) == 'string', 'config.position must be a space name')
   check(type(options.name) == 'string', 'config.name must be a string')
   check(options.datetime == 'datetime' or options.datetime == 'number', "config.datetime must be 'datetime' or 'number'")
@@ -108,12 +97,13 @@ local function new(config)
   end
   check(options.public_key == nil or type(options.public_key) == 'string', 'config.public_key must be a PEM string')
   if options.key == nil then
-    options.key = options.server
+    options.key = driver.key(options)
   end
   check((type(options.key) == 'number' and options.key >= 0 and options.key == math.floor(options.key)) or
     type(options.key) == 'string', 'config.key must be an unsigned integer or a string')
   return setmetatable({
     config = options,
+    driver = driver,
     sources = {},
     order = {},
     status = 'created',
@@ -145,57 +135,11 @@ function Replica:say(level, format, ...)
   log[level]('MirrorFlayer[%s]: ' .. format, self.config.name, ...)
 end
 
--- Connections ----------------------------------------------------------------
-
-function Replica:connect(host, port)
-  local connection = protocol.connect({
-    host = host,
-    port = port,
-    user = self.config.user,
-    password = self.config.password,
-    timeout = self.config.timeout,
-    tls = self.config.tls,
-    public_key = self.config.public_key
-  })
-  local status, problem = pcall(connection.query, connection, "SET time_zone = '+00:00'")
-  if not status then
-    connection:close()
-    error(problem, 0)
-  end
-  return connection
-end
+-- Sources ----------------------------------------------------------------------
 
 -- Reads the columns of the source table and binds the targets to them
-local function describe(connection, source, config)
-  local _, rows = connection:query(string.format(
-    'SELECT COLUMN_NAME, DATA_TYPE, COLUMN_TYPE FROM information_schema.COLUMNS ' ..
-    'WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s ORDER BY ORDINAL_POSITION',
-    protocol.literal(source.database), protocol.literal(source.table)))
-  if #rows == 0 then
-    error(failure(string.format('table %s does not exist or is not visible', source.id)), 0)
-  end
-  local columns = {}
-  for index, row in ipairs(rows) do
-    columns[index] = column.describe(row[1], row[2], row[3], config)
-  end
-  if connection.mariadb then
-    -- JSON of MariaDB is LONGTEXT with a json_valid() check
-    local _, checks = connection:query(string.format(
-      'SELECT CHECK_CLAUSE FROM information_schema.CHECK_CONSTRAINTS WHERE CONSTRAINT_SCHEMA = %s AND TABLE_NAME = %s',
-      protocol.literal(source.database), protocol.literal(source.table)))
-    local json = {}
-    for _, check in ipairs(checks) do
-      local name = string.match(check[1], '^json_valid%(`(.-)`%)$')
-      if name ~= nil then
-        json[name] = true
-      end
-    end
-    for _, item in ipairs(columns) do
-      if json[item.name] and item.kind == 'string' then
-        item.kind = 'json'
-      end
-    end
-  end
+function Replica:describe(connection, source)
+  local columns = connection:describe(source)
   for _, target in ipairs(source.targets) do
     target:bind(columns)
   end
@@ -203,9 +147,11 @@ local function describe(connection, source, config)
   source.stale = false
 end
 
+-- Describes a table again over a connection of its own while the stream
+-- holds the current one (the driver asks for it after DDL)
 function Replica:refresh(source)
-  local connection = self:connect(self.host, self.port)
-  local status, problem = pcall(describe, connection, source, self.config)
+  local connection = self.driver.connect(self.config, self.host, self.port)
+  local status, problem = pcall(self.describe, self, connection, source)
   connection:close()
   if not status then
     error(problem, 0)
@@ -214,31 +160,21 @@ end
 
 -- Full load ------------------------------------------------------------------
 
--- Remembers the binlog position first, then loads every table; changes made
--- meanwhile come again from the binlog and applying them is idempotent
+-- Takes the position of the source first, then loads every table; changes
+-- made meanwhile come again from the stream and applying them is idempotent
 function Replica:resync(connection)
-  local state   = self.dialect.position(connection)
+  local state   = connection:position()
   local started = clock.time()
   self.status = 'loading'
-  self:say('info', 'full load at GTID %s', state)
+  self:say('info', 'full load at %s', state ~= '' and state or '(start)')
   for _, source in ipairs(self.order) do
     local loader = store.load(source.targets, self.config.batch)
     local aborts = store.aborts()
-    local names  = {}
-    for index, item in ipairs(source.columns) do
-      names[index] = protocol.identifier(item.name)
-    end
-    local columns = source.columns
-    local count   = 0
-    connection:query(string.format('SELECT %s FROM %s.%s', table.concat(names, ', '),
-      protocol.identifier(source.database), protocol.identifier(source.table)), function (raw)
-        local row = {}
-        for index, item in ipairs(columns) do
-          row[index] = column.text(item, raw[index])
-        end
-        loader:add(row)
-        count = count + 1
-      end)
+    local count  = 0
+    connection:load(source, function (row)
+      loader:add(row)
+      count = count + 1
+    end)
     local deleted = loader:finish()
     self:say('info', '%s: %d rows loaded, %d written, %d stale rows deleted, %d aborted by triggers', source.id,
       count, loader.written, deleted, store.aborts() - aborts)
@@ -253,7 +189,7 @@ function Replica:resync(connection)
   return state
 end
 
--- Binlog stream --------------------------------------------------------------
+-- Stream -------------------------------------------------------------------------
 
 function Replica:flush()
   if not self.dirty then
@@ -266,22 +202,28 @@ function Replica:flush()
   self.stored = clock.time()
 end
 
--- Applies a finished binlog transaction with its position in one box
+-- The driver has asked the source for the stream
+function Replica:started()
+  self.status = 'streaming'
+  self.stats.error = nil
+  self:say('info', 'streaming from %s', self.stats.position ~= '' and self.stats.position or '(start)')
+end
+
+function Replica:heartbeat()
+  self.stats.heartbeat_time = clock.time()
+  self.stats.lag = 0
+  self:flush()
+end
+
+-- Applies a finished source transaction with its position in one box
 -- transaction; when a trigger of a target yields, statement by statement and
 -- the position last (counted in split). Transactions without changes only
 -- move the position, which is written at most once a second
-function Replica:commit(header)
-  local transaction = self.transaction
-  self.transaction = nil
-  if transaction == nil then
-    return
-  end
-  self.dialect.add(self.state, transaction)
-  local state = self.dialect.format(self.state)
+function Replica:commit(changes, state, event_time)
   local stats = self.stats
   stats.position = state
-  stats.event_time = header.timestamp
-  if #transaction.changes == 0 then
+  stats.event_time = event_time
+  if #changes == 0 then
     self.dirty = true
     if clock.time() - (self.stored or 0) >= 1 then
       self:flush()
@@ -289,7 +231,7 @@ function Replica:commit(header)
     return
   end
   local statements = {}
-  for _, change in ipairs(transaction.changes) do
+  for _, change in ipairs(changes) do
     for _, target in ipairs(change[1].targets) do
       table.insert(statements, { target, change[2], change[3], change[4] })
     end
@@ -297,7 +239,7 @@ function Replica:commit(header)
   local atomic = store.apply(statements, function (item)
     item[1]:apply(item[2], item[3], item[4])
   end, function ()
-    self.position:put(state, header.timestamp)
+    self.position:put(state, event_time)
   end)
   if not atomic then
     stats.split = stats.split + 1
@@ -305,117 +247,9 @@ function Replica:commit(header)
   self.dirty = false
   self.stored = clock.time()
   stats.applied_time = self.stored
-  stats.lag = math.max(0, self.stored - header.timestamp)
+  stats.lag = math.max(0, self.stored - event_time)
   stats.transactions = stats.transactions + 1
-  stats.rows = stats.rows + #transaction.changes
-end
-
-local function statement(text)
-  return string.upper(string.match(text, '^%s*(.-)%s*;?%s*$'))
-end
-
-function Replica:truncates(text)
-  local upper = statement(text)
-  if string.match(upper, '^TRUNCATE') == nil then
-    return false
-  end
-  for _, source in ipairs(self.order) do
-    if string.find(upper, string.upper(source.table), 1, true) ~= nil then
-      return true
-    end
-  end
-  return false
-end
-
-function Replica:event(packet)
-  local header = binlog.event(packet, self.checksum)
-  local type   = header.type
-
-  if type == E.FORMAT_DESCRIPTION then
-    self.checksum = header.checksum == 1
-  elseif type == E.HEARTBEAT or type == E.HEARTBEAT_V2 then
-    self.stats.heartbeat_time = clock.time()
-    self.stats.lag = 0
-    self:flush()
-  elseif type == E.GTID or type == E.GTID_MYSQL then
-    local gtid = self.dialect.gtid(header)
-    if self.transaction ~= nil then
-      self:say('warn', 'transaction %s has no end, dropped', self.transaction.gtid)
-    end
-    gtid.changes = {}
-    self.transaction = gtid
-  elseif type == E.TABLE_MAP then
-    local map    = binlog.table_map(header)
-    local source = self.sources[map.schema .. '.' .. map.table]
-    if source == nil then
-      self.maps[map.id] = false
-      return
-    end
-    if source.stale or #map.types ~= #source.columns then
-      self:refresh(source)
-    end
-    if #map.types ~= #source.columns then
-      -- The binlog predates the current table definition
-      self.resync_needed = true
-      error(failure(string.format('%s: binlog has %d columns, table has %d; reloading',
-        source.id, #map.types, #source.columns)), 0)
-    end
-    map.source = source
-    self.maps[map.id] = map
-  elseif binlog.ROWS[type] ~= nil then
-    local map = self.maps[binlog.rows_table(header)]
-    if map == nil then
-      error(failure('rows event without a table map'), 0)
-    end
-    if map == false then
-      return
-    end
-    if self.transaction == nil then
-      error(failure('rows event outside of a transaction'), 0)
-    end
-    local operation, rows = binlog.rows(header, map, map.source.columns)
-    local changes = self.transaction.changes
-    for _, row in ipairs(rows) do
-      table.insert(changes, { map.source, operation, row[1], row[2] })
-    end
-  elseif type == E.XID then
-    self:commit(header)
-  elseif type == E.QUERY then
-    local query = binlog.query(header)
-    local text  = statement(query.query)
-    if text == 'BEGIN' then
-      if self.transaction ~= nil then
-        self.transaction.standalone = false
-      end
-      return
-    end
-    if text == 'COMMIT' then
-      self:commit(header)
-      return
-    end
-    if text == 'ROLLBACK' then
-      if self.transaction ~= nil then
-        self.transaction.changes = {}
-      end
-      self:commit(header)
-      return
-    end
-    if self.transaction ~= nil and self.transaction.standalone then
-      -- DDL and other statements outside transactions
-      for _, source in ipairs(self.order) do
-        source.stale = true
-      end
-      if self:truncates(query.query) then
-        self.resync_needed = true
-        error(failure('mapped table truncated, reloading'), 0)
-      end
-      self:commit(header)
-    end
-  elseif UNSUPPORTED[type] ~= nil then
-    fatal('%s', UNSUPPORTED[type])
-  end
-  -- ROTATE, STOP, GTID_LIST, BINLOG_CHECKPOINT, ANNOTATE_ROWS, ROWS_QUERY,
-  -- PREVIOUS_GTIDS, TRANSACTION_CONTEXT, VIEW_CHANGE need nothing
+  stats.rows = stats.rows + #changes
 end
 
 -- Resolves the target spaces and opens the position space. It runs in the
@@ -436,51 +270,24 @@ function Replica:session(host, port)
   if not self.bound then
     self:bind()
   end
-  local connection = self:connect(host, port)
+  local connection = self.driver.connect(self.config, host, port)
   self.connection = connection
   self.host, self.port = host, port
-  self.dialect   = connection.mariadb and mariadb or mysql
-  self.stats.tls = connection.secure == true
+  self.stats.tls = connection.secure
   self:say('info', 'connected to %s:%d, %s%s', host, port, connection.version, connection.secure and ', TLS' or '')
 
   for _, source in ipairs(self.order) do
-    describe(connection, source, self.config)
+    self:describe(connection, source)
   end
 
   local state = self.position:get()
   if state == nil or self.resync_needed then
     state = self:resync(connection)
   end
-  self.state = self.dialect.parse(state)
   self.stats.position = state
-  self.maps = {}
-  self.transaction = nil
   self.dirty = false
 
-  self.checksum = self.dialect.request(connection, {
-    state = state,
-    server = self.config.server,
-    heartbeat = self.config.heartbeat
-  })
-  self.status = 'streaming'
-  self.stats.error = nil
-  self:say('info', 'streaming from GTID %s', state ~= '' and state or '(start)')
-
-  local timeout = self.config.heartbeat * 3
-  while true do
-    local packet = connection:read_packet(timeout)
-    local first  = string.byte(packet, 1)
-    if first == 0xff then
-      error(protocol.server_error(packet), 0)
-    end
-    if first == 0xfe and #packet < 9 then
-      error(failure('binlog stream ended by the server'), 0)
-    end
-    if first ~= 0x00 then
-      error(failure(string.format('unexpected packet 0x%02x in the binlog stream', first)), 0)
-    end
-    self:event(string.sub(packet, 2))
-  end
+  connection:stream(state, self.sources, self)
 end
 
 -- Keeps failure objects, adds the stack to unexpected errors
@@ -495,7 +302,7 @@ local function loop(self)
   local hosts = self.config.hosts
   local index = 1
   while not self.stopping do
-    local host, port = address(hosts[index])
+    local host, port = address(hosts[index], self.driver.PORT)
     local status, problem = xpcall(self.session, trace, self, host, port)
     if self.connection ~= nil then
       self.connection:close()
@@ -514,9 +321,9 @@ local function loop(self)
       self:say('error', 'stopped: %s', tostring(problem))
       break
     end
-    if type(problem) == 'table' and problem.code == 1236 then
+    if type(problem) == 'table' and problem.reload then
       self.resync_needed = true
-      self:say('warn', '%s:%d: position is not in the binlog, full reload: %s', host, port, tostring(problem))
+      self:say('warn', '%s:%d: full reload: %s', host, port, tostring(problem))
     else
       self:say('error', '%s:%d: %s', host, port, tostring(problem))
     end
@@ -547,9 +354,9 @@ function Replica:register()
     return
   end
   self.gauges = {
-    lag = metrics.gauge('mirrorflayer_lag_seconds', 'Delay of the last applied binlog transaction'),
-    event = metrics.gauge('mirrorflayer_event_timestamp_seconds', 'Source time of the last applied binlog event'),
-    applied = metrics.gauge('mirrorflayer_applied_timestamp_seconds', 'Local time of the last applied binlog transaction')
+    lag = metrics.gauge('mirrorflayer_lag_seconds', 'Delay of the last applied source transaction'),
+    event = metrics.gauge('mirrorflayer_event_timestamp_seconds', 'Source time of the last applied source transaction'),
+    applied = metrics.gauge('mirrorflayer_applied_timestamp_seconds', 'Local time of the last applied source transaction')
   }
   self.callback = function () self:collect() end
   metrics.register_callback(self.callback)
@@ -572,7 +379,8 @@ function Replica:start()
   check(type(config.hosts) == 'table' and #config.hosts > 0, 'config.hosts must be a non-empty array')
   check(type(config.user) == 'string', 'config.user must be a string')
   check(config.password == nil or type(config.password) == 'string', 'config.password must be a string')
-  check(type(config.server) == 'number' and config.server > 0, 'config.server must be a positive number')
+  local problem = self.driver.check(config)
+  check(problem == nil, '%s', problem)
   self.bound    = false
   self.stopping = false
   self.status = 'starting'
@@ -607,7 +415,7 @@ function Replica:reload()
   return self:start()
 end
 
--- Returns the state: status, host, position (GTID state), event_time (source
+-- Returns the state: status, host, position (of the source), event_time (source
 -- time of the last applied transaction), applied_time, lag (seconds between
 -- the two, 0 after a heartbeat), counters and the last error
 function Replica:stat()

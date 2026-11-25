@@ -1,7 +1,7 @@
 -- MySQL dialect: GTID sets uuid:1-100:105, GTID_LOG_EVENT and the stream
 -- request COM_BINLOG_DUMP_GTID. The source needs gtid_mode=ON.
 
-local protocol = require('MirrorFlayer.Protocol')
+local protocol = require('MirrorFlayer.MySQL.Protocol')
 
 local char, format, gsub = string.char, string.format, string.gsub
 

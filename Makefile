@@ -14,6 +14,7 @@ SSH       ?= ssh
 MACHINE := $(shell $(CC) -dumpmachine)
 LIBDIR  ?= $(PREFIX)/lib/$(MACHINE)/tarantool
 MODULES := $(wildcard Source/*.lua)
+MYSQL   := $(wildcard Source/MySQL/*.lua)
 LIBRARY := $(if $(filter-out 0,$(TLS)),Source/TLS.so)
 
 override CFLAGS += -std=gnu99 -Wall -fPIC $(shell pkg-config --cflags tarantool 2>/dev/null || echo -I/usr/include/tarantool)
@@ -24,14 +25,15 @@ Source/TLS.so: Source/TLS.c
 	$(CC) $(CFLAGS) -shared $< $(LDFLAGS) -lssl -lcrypto -o $@
 
 check:
-	@for file in $(MODULES) Tests/*.lua; do \
+	@for file in $(MODULES) $(MYSQL) Tests/*.lua; do \
 	  $(TARANTOOL) -e "assert(loadfile('$$file')) os.exit(0)" || exit 1; \
 	done
 	@echo checked
 
 install: all
-	install -d $(DESTDIR)$(LUADIR)/MirrorFlayer
+	install -d $(DESTDIR)$(LUADIR)/MirrorFlayer/MySQL
 	install -m 644 $(MODULES) $(DESTDIR)$(LUADIR)/MirrorFlayer/
+	install -m 644 $(MYSQL) $(DESTDIR)$(LUADIR)/MirrorFlayer/MySQL/
 ifneq ($(LIBRARY),)
 	install -d $(DESTDIR)$(LIBDIR)/MirrorFlayer
 	install -m 644 $(LIBRARY) $(DESTDIR)$(LIBDIR)/MirrorFlayer/

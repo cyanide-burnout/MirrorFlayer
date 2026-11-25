@@ -4,8 +4,8 @@
 local ffi = require('ffi')
 local bit = require('bit')
 
-local protocol = require('MirrorFlayer.Protocol')
-local column   = require('MirrorFlayer.Column')
+local protocol = require('MirrorFlayer.MySQL.Protocol')
+local column   = require('MirrorFlayer.MySQL.Column')
 
 local band, bxor, bnot, rshift, tobit = bit.band, bit.bxor, bit.bnot, bit.rshift, bit.tobit
 

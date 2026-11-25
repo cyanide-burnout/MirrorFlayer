@@ -6,6 +6,7 @@ local bit    = require('bit')
 local digest = require('digest')
 
 local transport = require('MirrorFlayer.Transport')
+local errors    = require('MirrorFlayer.Failure')
 
 local band, bor, bxor = bit.band, bit.bor, bit.bxor
 local byte, char, sub = string.byte, string.char, string.sub
@@ -28,26 +29,7 @@ local CHARSET_UTF8MB4_GENERAL_CI = 45
 local COM_QUIT  = 0x01
 local COM_QUERY = 0x03
 
--- Errors ---------------------------------------------------------------------
-
-local Failure = {}
-Failure.__index = Failure
-Failure.__tostring = function (self)
-  if self.code ~= nil then
-    return string.format('%s (%d)', self.message, self.code)
-  end
-  return self.message
-end
-
--- A raised error object; code is the server error number, fatal stops the
--- replicator instead of reconnecting
-local function failure(message, code, fatal)
-  return setmetatable({ message = message, code = code, fatal = fatal }, Failure)
-end
-
-local function fatal(format, ...)
-  error(failure(string.format(format, ...), nil, true), 0)
-end
+local failure, fatal = errors.failure, errors.fatal
 
 -- Reader over a string -------------------------------------------------------
 

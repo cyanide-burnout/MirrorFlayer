@@ -47,7 +47,7 @@ Requirements on the source: `log_bin`, `binlog_format=ROW`,
 MySQL). Tarantool 3.x (LuaJIT).
 
 * **Dialects.** The greeting tells MariaDB (`MariaDB` in the version) from
-  MySQL, and `MirrorFlayer.MariaDB` or `MirrorFlayer.MySQL` handles the GTID
+  MySQL, and `MirrorFlayer.MySQL.MariaDB` or `MirrorFlayer.MySQL.GTID` handles the GTID
   format, the GTID event and the stream request. A MariaDB GTID event says
   whether the group is standalone (DDL); in MySQL a DDL statement is a GTID
   event and a QUERY without BEGIN, so a MySQL group counts as standalone until
@@ -61,19 +61,43 @@ MySQL). Tarantool 3.x (LuaJIT).
 
 ## Modules
 
-Each module is `Source/<Name>.lua`, installed as `MirrorFlayer/<Name>.lua`.
+The engine and what every source shares are `Source/<Name>.lua`, installed as
+`MirrorFlayer/<Name>.lua`; a source driver is a subdirectory, `Source/MySQL/`
+installed as `MirrorFlayer/MySQL/`, its `init.lua` being the driver itself.
 
 | Module | Role |
 |--------|------|
-| `MirrorFlayer` (`Source/init.lua`) | API, replication fiber, reconnection, host rotation, event dispatch |
+| `MirrorFlayer` (`Source/init.lua`) | the engine: API, replication fiber, reconnection, host rotation, transactions, positions, statistics, metrics |
+| `MirrorFlayer.Failure` | failure objects: fatal stops the replicator, reload asks for a full load |
+| `MirrorFlayer.Column` | values in their Tarantool types, datetime and json modes |
+| `MirrorFlayer.Store` | targets, pacing of writes, full load, position |
 | `MirrorFlayer.Transport` | `read(n)`/`write(s)`/`close()`; plain TCP over the Tarantool `socket`, `secure()` moves it onto TLS |
 | `MirrorFlayer.TLS` (`Source/TLS.c` → `TLS.so`) | TLS over the already connected descriptor, RSA-OAEP for `caching_sha2_password` and `sha256_password` |
-| `MirrorFlayer.Protocol` | packets, greeting, SSL Request, authentication, `COM_QUERY` with a streamed text result |
-| `MirrorFlayer.MariaDB` | MariaDB dialect: GTID state, GTID event, `COM_BINLOG_DUMP` after `@slave_connect_state` |
-| `MirrorFlayer.MySQL` | MySQL dialect: GTID sets, GTID_LOG_EVENT, `COM_BINLOG_DUMP_GTID` |
-| `MirrorFlayer.BinLog` | events: FORMAT_DESCRIPTION, ROTATE, QUERY, XID, TABLE_MAP, ROWS v1/v2, CRC32 |
-| `MirrorFlayer.Column` | type metadata and values, NULL bitmaps, binary JSON of MySQL |
-| `MirrorFlayer.Store` | targets, full load, position |
+| `MirrorFlayer.MySQL` (`Source/MySQL/init.lua`) | the driver of MySQL and MariaDB: session, columns, snapshot, binlog stream and its events |
+| `MirrorFlayer.MySQL.Protocol` | packets, greeting, SSL Request, authentication, `COM_QUERY` with a streamed text result |
+| `MirrorFlayer.MySQL.MariaDB` | MariaDB dialect: GTID state, GTID event, `COM_BINLOG_DUMP` after `@slave_connect_state` |
+| `MirrorFlayer.MySQL.GTID` | MySQL dialect: GTID sets, GTID_LOG_EVENT, `COM_BINLOG_DUMP_GTID` |
+| `MirrorFlayer.MySQL.BinLog` | events: FORMAT_DESCRIPTION, ROTATE, QUERY, XID, TABLE_MAP, ROWS v1/v2, CRC32 |
+| `MirrorFlayer.MySQL.Column` | types of MySQL, text and binlog values, NULL bitmaps, binary JSON |
+
+### Drivers
+
+`config.type` picks the driver, `'mysql'` by default. The engine knows nothing
+of binlogs: a driver gives it a session on one host.
+
+| Call | Does |
+|------|------|
+| `driver.connect(config, host, port)` | connects and returns a session with `version` and `secure` |
+| `session:describe(source)` | the columns of the table: name, type, kind, supported |
+| `session:position()` | the current position of the source as a string |
+| `session:load(source, each)` | the snapshot of the table, `each(row)` with values converted |
+| `session:stream(position, sources, handler)` | changes after the position until an error: `handler:started()`, `handler:commit(changes, position, event_time)`, `handler:heartbeat()`, `handler:refresh(source)` after DDL |
+| `session:close()` | closes the connection |
+
+A change is `{ source, operation, old, new }`. A failure with `reload` (a
+position the source no longer has, a table changed under the stream) makes
+the next connection begin with a full load. `driver.PORT`, `driver.key(config)`
+(the default key of the position) and `driver.check(config)` complete it.
 
 ### Stream request (MariaDB)
 
