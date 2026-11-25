@@ -311,7 +311,7 @@ local function caught_up(replica)
     if stat.status == 'failed' then
       error('replicator failed: ' .. tostring(stat.error), 0)
     end
-    return stat.position == target
+    return stat.position == target and stat.status == 'streaming'
   end, 'position ' .. target)
   return target
 end
