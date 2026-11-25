@@ -31,14 +31,17 @@ Requires Tarantool 3.x and
 
 2.0 breaks with the first release in what applications read:
 
-* Values have their Tarantool types. `DATETIME`, `TIMESTAMP` and `DATE` are
-  `datetime` in UTC, `TIME` is `interval`; `datetime = 'number'` gives
-  seconds instead, since the epoch for dates. JSON is MsgPack maps and arrays
-  (`json = 'string'` keeps the text), UUID is `uuid`
-  (`uuid = 'binary' | 'string'`). Code that
-  parsed dates from strings reads them directly: `value.timestamp` instead of
-  `datetime.parse(value, ...)`, and a space format may type the field as
-  `datetime`.
+* Values have their Tarantool types:
+  * `DATETIME`, `TIMESTAMP` and `DATE` are `datetime` in UTC; with
+    `datetime = 'number'` they are seconds since the Unix epoch.
+  * `TIME` is `interval`; with `datetime = 'number'` it is a duration in
+    seconds.
+  * JSON is MsgPack maps and arrays; `json = 'string'` keeps the text.
+  * UUID is `uuid`; `uuid = 'binary' | 'string'` gives 16 bytes or the text.
+
+  Code that parsed dates from strings reads them directly: `value.timestamp`
+  instead of `datetime.parse(value, ...)`, and a space format may type the
+  field as `datetime`.
 * Sources are drivers: `type = 'mysql'` (the default) or `'postgresql'`. The
   MySQL modules moved to `MirrorFlayer.MySQL.*` in the `MySQL/` subdirectory;
   remove an installed `MirrorFlayer/MySQL.lua` of the first release, it would
