@@ -113,7 +113,7 @@ local function new(config)
     sources = {},
     order = {},
     status = 'created',
-    stats = { transactions = 0, rows = 0, resyncs = 0, split = 0 }
+    stats = { transactions = 0, rows = 0, loads = 0, split = 0 }
   }, Replica)
 end
 
@@ -168,7 +168,7 @@ end
 
 -- Takes the position of the source first, then loads every table; changes
 -- made meanwhile come again from the stream and applying them is idempotent
-function Replica:resync(connection)
+function Replica:load(connection)
   local state   = connection:position()
   local started = clock.time()
   self.status = 'loading'
@@ -188,9 +188,9 @@ function Replica:resync(connection)
   store.transaction(function ()
     self.position:put(state, clock.time())
   end)
-  self.stats.resyncs = self.stats.resyncs + 1
+  self.stats.loads = self.stats.loads + 1
   self.stats.position = state
-  self.resync_needed = false
+  self.reload_needed = false
   self:say('info', 'full load done in %.1f s', clock.time() - started)
   return state
 end
@@ -297,8 +297,8 @@ function Replica:session(host, port)
   end
 
   local state = self.position:get()
-  if state == nil or self.resync_needed then
-    state = self:resync(connection)
+  if state == nil or self.reload_needed then
+    state = self:load(connection)
   end
   self.stats.position = state
   self.dirty = false
@@ -338,7 +338,7 @@ local function loop(self)
       break
     end
     if type(problem) == 'table' and problem.reload then
-      self.resync_needed = true
+      self.reload_needed = true
       self:say('warn', '%s:%d: full reload: %s', host, port, tostring(problem))
     else
       self:say('error', '%s:%d: %s', host, port, tostring(problem))
@@ -426,14 +426,15 @@ end
 -- over the spaces as usual, so they never go empty
 function Replica:reload()
   check(self.fiber ~= nil, 'not started')
-  self.resync_needed = true
+  self.reload_needed = true
   self:stop()
   return self:start()
 end
 
 -- Returns the state: status, host, position (of the source), event_time (source
 -- time of the last applied transaction), applied_time, lag (seconds between
--- the two, 0 after a heartbeat), counters and the last error
+-- the two, 0 after a heartbeat), the counters transactions, rows, loads (full
+-- loads), split and aborts, and the last error
 function Replica:stat()
   local stats = self.stats
   return {
@@ -447,7 +448,7 @@ function Replica:stat()
     lag = stats.lag,
     transactions = stats.transactions,
     rows = stats.rows,
-    resyncs = stats.resyncs,
+    loads = stats.loads,
     tls = stats.tls,
     split = stats.split,
     aborts = store.aborts(),

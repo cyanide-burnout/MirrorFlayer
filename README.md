@@ -58,7 +58,7 @@ local replica = MirrorFlayer.new({
 replica:map('Registry', 'Locations', 'GlobalLocations', { 'ID', 'Node', 'Kind', 'Link', 'Slot', 'Modified' })
 replica:start()
 
-replica:stat()   -- status, position, lag, counters, last error
+replica:stat()   -- status, host, position, lag, event time, counters (transactions, rows, loads, split, aborts), last error
 replica:reload() -- restart with a full load over the spaces
 replica:stop()
 ```
