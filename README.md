@@ -8,8 +8,8 @@ The goal of the project is to replace
 [tarantool/mysql-tarantool-replication](https://github.com/tarantool/mysql-tarantool-replication)
 — `replicatord`, a separate C++ daemon built on libslave and the MySQL client
 library, configured in YAML and writing into Tarantool over the network —
-with a replicator that lives inside Tarantool. MirrorFlayer keeps the values
-replicatord wrote, so the code reading the spaces sees no difference.
+with a replicator that lives inside Tarantool, where every value gets its
+Tarantool type.
 
 MariaDB and MySQL, with or without TLS; `mysql_native_password`,
 `caching_sha2_password` and `sha256_password`. Internals, OpenSSL findings
@@ -48,8 +48,10 @@ Configuration is Lua only.
 | `server`    | —              | Server id of this replica, unique among the replicas of the source |
 | `tls`       | `false`        | `true` for TLS without verification, or `{ verify = 'none' \| 'ca' \| 'identity', ca = 'ca.pem', cert = 'client.pem', key = 'client.key' }`; with `ca` verification defaults to `'ca'`, without it to `'none'`; `'ca'` and `'identity'` without `ca` use the system store. Needs `MirrorFlayer.TLS` |
 | `public_key` | —             | PEM public key of the source for `caching_sha2_password`/`sha256_password` without TLS; without it the key is asked from the server (open to a man in the middle) |
-| `position`  | `'ReplicatorPositions'` | Space that keeps the position, created when missing with an unsigned key as Registry creates it |
-| `key`       | `server`       | Key of the position in that space: a stable number or string of this replicator, the replica server id by default (0 is the Python replicator's) |
+| `position`  | `'ReplicatorPositions'` | Space that keeps the position, created when missing with a key of the type of `key` |
+| `key`       | `server`       | Key of the position in that space: a stable number or string of this replicator, the replica server id by default |
+| `datetime`  | `'datetime'`   | Dates and times: `'datetime'` (`datetime` and `interval` of Tarantool) or `'number'` (seconds), see *Values* |
+| `json`      | `'map'`        | JSON: `'map'` (MsgPack maps and arrays) or `'string'` (the text the server prints), see *Values* |
 | `name`      | `'MirrorFlayer'` | Name in logs and the label of metrics |
 | `heartbeat` | `10`           | Seconds between heartbeats of an idle source; no data for three periods reconnects |
 | `timeout`   | `30`           | Connect and query timeout, seconds |
@@ -86,29 +88,42 @@ is aborted.
 
 ## Values
 
-One conversion table (`MirrorFlayer.Column`) serves both the text result of
-the initial load and binlog row images, so a row gives the same tuple either
-way. Values follow the Python replicator:
+One conversion table (`MirrorFlayer.Column`) serves both the snapshot of the
+full load and the row images of the stream, so a row gives the same tuple
+either way. Every value gets its Tarantool type.
 
-| MySQL type | Tarantool value |
-|------------|-----------------|
-| integers, `YEAR` | number; `uint64_t`/`int64_t` cdata beyond 2^53 |
+### MySQL and MariaDB
+
+| Source type | Tarantool value |
+|-------------|-----------------|
+| `TINYINT` … `BIGINT`, signed or unsigned, `TINYINT(1)` and `BOOLEAN` included | number; `int64_t`/`uint64_t` cdata beyond 2^53 |
 | `FLOAT` | number, rounded to single precision on both paths |
-| `DOUBLE` | number |
-| `DECIMAL` | `decimal` |
-| `DATETIME`, `TIMESTAMP` | string `'YYYY-MM-DD HH:MM:SS'`, fractions dropped; `TIMESTAMP` in UTC (the session time zone is `+00:00`, the binlog keeps UTC epoch seconds) |
-| `DATE`, `TIME` | `'YYYY-MM-DD'`, `'HH:MM:SS'` |
-| zero dates | `box.NULL` |
+| `DOUBLE`, `REAL` | number |
+| `DECIMAL`, `NUMERIC` | `decimal` |
+| `DATETIME`, `TIMESTAMP` | `datetime` in UTC with fractions; `'number'`: seconds since the Unix epoch with fractions |
+| `DATE` | `datetime` at midnight UTC; `'number'`: seconds since the Unix epoch |
+| `TIME` | `interval`, negative for a negative time; `'number'`: seconds |
+| `YEAR` | number |
+| zero dates (`0000-00-00`) | `box.NULL` |
 | `CHAR`, `VARCHAR`, `TEXT` | string |
-| `JSON` | string; MariaDB keeps it as text, the binary JSON of MySQL is printed the way MySQL prints it (`{"a": [1, 2.5, true]}`, keys in stored order); values of DECIMAL or date types inside MySQL JSON stop the replicator |
-| `BINARY`, `VARBINARY`, `BLOB` | `varbinary` (MP_BIN), as Python `bytes` were written |
-| `ENUM`, `SET` | member string(s) |
+| `BINARY`, `VARBINARY`, `BLOB` | `varbinary` (MP_BIN) |
+| `JSON` | MsgPack map or array, JSON `null` as `box.NULL`; `'string'`: the text the server prints |
+| `UUID` (MariaDB) | `uuid` |
+| `ENUM` | member string |
+| `SET` | members joined by commas |
 | `BIT` | number |
 | `NULL` | `box.NULL` |
 
+`TIMESTAMP` is read in UTC: the session time zone is `+00:00`, and the binlog
+keeps UTC epoch seconds. In the `'string'` JSON mode the binary JSON of MySQL
+is printed the way MySQL prints it (`{"a": [1, 2.5, true]}`, keys in the
+stored order); MariaDB keeps JSON as text, a `LONGTEXT` with a `json_valid()`
+check, which is how the driver knows these columns. Values of `DECIMAL` or
+date types inside MySQL JSON stop the replicator.
+
 Binlog row images carry no names, signedness or member lists; they come from
 `information_schema.COLUMNS` on every connection and again after DDL. Types
-not listed (MariaDB `UUID`, `INET6`, geometry) are refused when mapped.
+not listed (`INET4`, `INET6`, geometry) are refused when mapped.
 
 ## Build and install
 
@@ -149,14 +164,16 @@ RSA first and the server cache later.
 
 1. `load` — tables with data exist before the start: full load, values of all
    types, then INSERT/UPDATE/DELETE over the stream, a key change, a
-   multi-table transaction, `on_replace` triggers and a function target.
+   multi-table transaction, `on_replace` triggers, a trigger that yields and a
+   function target; a second replicator checks `datetime = 'number'` and
+   `json = 'string'` over the load and the stream.
 2. `resume` — changes made while Tarantool is down; restart continues from the
    stored GTID without a full load.
 3. `purge` — changes and a purge of the binlog while down: error 1236, full
    load that also deletes rows gone from the source.
-4. `legacy` — a fresh instance with the Python position `[0, gtid, 0]` in
-   `ReplicatorPositions` continues from it, writes its own position under the
-   server id and leaves key 0 as it was.
+4. `late` — a fresh instance started before its space exists retries, loads
+   everything once the space is made, and stops quietly when its fiber is
+   cancelled from outside.
 
 `Tests/RemoteTest.sh host` copies the tree to a Docker host over ssh and
 runs the test there with the same variables:
