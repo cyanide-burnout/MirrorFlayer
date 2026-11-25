@@ -482,7 +482,8 @@ local function loop(self)
     if box.is_in_txn() then
       box.rollback()
     end
-    if self.stopping then
+    -- stop() or a cancel from outside, e.g. Tarantool shutting down
+    if self.stopping or not pcall(fiber.testcancel) then
       break
     end
     self.stats.error = tostring(problem)

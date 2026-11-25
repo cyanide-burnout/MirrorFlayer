@@ -443,6 +443,10 @@ local function legacy()
   stored_position(replica, KEY, target)
   ok(box.space.ReplicatorPositions:get(KEY)[3] > 0, 'event time stored next to the GTID')
   ok(encode(box.space.ReplicatorPositions:get(0)) == encode({ 0, state, 0 }), 'the Python position is left as it was')
+  -- Cancelled from outside, as on shutdown: no error, just stopped
+  replica.fiber:cancel()
+  wait(function () return replica:stat().status == 'stopped' end, 'stop after a cancel')
+  ok(replica:stat().error == nil, 'a cancel is not an error: %s', tostring(replica:stat().error))
   replica:stop()
 end
 
