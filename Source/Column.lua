@@ -418,7 +418,7 @@ local function uuid_row(value)
   if version >= 1 and version <= 5 and band(byte(swapped, 9), 0xc0) == 0x80 then
     value = swapped
   end
-  return uuid.frombin(value)
+  return uuid.frombin(value, 'b')
 end
 
 local function finish(column, value)
