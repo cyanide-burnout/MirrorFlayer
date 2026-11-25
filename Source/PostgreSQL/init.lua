@@ -139,10 +139,13 @@ function Session:position()
   return self.slot .. '/' .. start
 end
 
--- Reads the table in the snapshot of the slot, row by row, values converted
+-- Reads the table row by row, values converted: in the snapshot of the slot
+-- after position(), else in a snapshot of its own (a table loaded alone, the
+-- stream from the stored position converges over it)
 function Session:load(source, each)
   if self.loader == nil then
-    errors.fatal('load() without position()')
+    self.loader = open(self.config, self.host, self.port, false)
+    self.loader:query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY')
   end
   local columns = source.columns
   local names   = {}

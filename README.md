@@ -62,8 +62,9 @@ local replica = MirrorFlayer.new({
 replica:map('Registry', 'Locations', 'GlobalLocations', { 'ID', 'Node', 'Kind', 'Link', 'Slot', 'Modified' })
 replica:start()
 
-replica:stat()   -- status, host, position, lag, event time, counters (transactions, rows, loads, split, aborts), last error
+replica:stat()   -- status, host, position, lag, event time, counters (transactions, rows, loads, fills, split, aborts), last error
 replica:reload() -- restart with a full load over the spaces
+replica:reload(true) -- the same, each space emptied right before its table is loaded
 replica:stop()
 ```
 
@@ -99,6 +100,7 @@ Configuration is Lua only.
 | `uuid`      | `'uuid'`       | UUID: `'uuid'` (`uuid` of Tarantool), `'binary'` (16 bytes in network byte order, `varbinary`) or `'string'` (canonical text, lowercase) |
 | `name`      | `'MirrorFlayer'` | Name in logs and the label of metrics |
 | `heartbeat` | `10`           | Seconds between heartbeats of an idle source; no data for three periods reconnects |
+| `check`     | `30`           | Galera: seconds between checks that the node is ready (`wsrep_ready`, primary component); a node that is not is left for the next host, on connect as well |
 | `timeout`   | `30`           | Connect and query timeout, seconds |
 | `batch`     | `100`          | Statements per transaction during a full load; the fiber yields after each |
 | `retry`     | `5`            | Seconds between connection attempts |
@@ -117,6 +119,14 @@ mapping errors stop the replicator (`stat().error`).
   names of `space:format()` are used (spaces without a format need the list).
 * The key is the primary index of the space; there is no `key_fields`.
 * One table may go to several targets (call `map` several times).
+* A table whose spaces are all empty while the position is there (a space
+  made anew, emptied by hand) is loaded alone before the stream, without a
+  full load of the others (`stat().fills`); the stream from the stored
+  position converges over it. `replica:reload()` reloads everything over
+  the spaces, which never go empty: rows gone from the source are deleted
+  afterwards. `replica:reload(true)` empties the spaces of each table
+  (`truncate`, which fires no `on_replace` triggers) right before it is
+  loaded.
 * Spaces are written with ordinary `replace`/`delete`, so `on_replace`
   triggers keep working. A full load writes only rows that differ from the
   stored tuples, at most `batch` per transaction, and yields after each, so
@@ -238,7 +248,7 @@ and `caching_sha2_password` only while the server has the password cached
 With LuaRocks of Tarantool (`tt rocks`), the same headers are needed:
 
 ```
-tt rocks install https://raw.githubusercontent.com/cyanide-burnout/MirrorFlayer/2.0.0/mirrorflayer-2.0.0-1.rockspec
+tt rocks install https://raw.githubusercontent.com/cyanide-burnout/MirrorFlayer/2.1.0/mirrorflayer-2.1.0-1.rockspec
 tt rocks install https://raw.githubusercontent.com/cyanide-burnout/MirrorFlayer/main/mirrorflayer-scm-1.rockspec   # main
 tt rocks make mirrorflayer-scm-1.rockspec   # from a checkout
 ```
@@ -248,8 +258,9 @@ tt rocks make mirrorflayer-scm-1.rockspec   # from a checkout
 `Tests/DockerTest.sh` builds `TLS.so`, runs MariaDB or MySQL with a row-based
 binlog, or PostgreSQL with `wal_level=logical`, and Tarantool 3 in Docker and
 drives `Tests/MirrorFlayerTest.lua` or `Tests/PostgreSQLTest.lua` through
-phases. `SERVER=mariadb|mysql|postgresql` picks the source (`mariadb:11.4`,
-`mysql:8.4`, `postgres:17`, `SERVER_IMAGE` overrides), `TLS=off|on|ca` the
+phases. `SERVER=mariadb|galera|mysql|postgresql` picks the source
+(`mariadb:11.4`, the same as a Galera cluster of one node, `mysql:8.4`,
+`postgres:17`, `SERVER_IMAGE` overrides), `TLS=off|on|ca` the
 connection of the replicator (`ca` verifies against the CA of the server).
 MySQL users authenticate with `caching_sha2_password`, so a run without TLS
 goes through RSA first and the server cache later; PostgreSQL users with
@@ -261,9 +272,11 @@ goes through RSA first and the server cache later; PostgreSQL users with
    function target; two more replicators check `datetime = 'number'`,
    `json = 'string'`, `uuid = 'string'` and `uuid = 'binary'` over the load
    and the stream. PostgreSQL also keeps a TOAST value an update did not
-   send.
+   send. A Galera node that leaves its cluster is left and taken again when
+   it is back.
 2. `resume` — changes made while Tarantool is down; restart continues from the
-   stored position without a full load.
+   stored position without a full load, and a space emptied meanwhile gets
+   its table loaded alone.
 3. `purge` — changes and a lost position while down (a purge of the binlog,
    error 1236; a dropped slot): full load that also deletes rows gone from
    the source.

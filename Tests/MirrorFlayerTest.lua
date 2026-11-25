@@ -1,8 +1,10 @@
 #!/usr/bin/env tarantool
--- Docker test of MirrorFlayer against MariaDB or MySQL (SERVER), with or
--- without TLS (TLS = off | on | ca), driven by Tests/DockerTest.sh:
+-- Docker test of MirrorFlayer against MariaDB, a node of MariaDB Galera or
+-- MySQL (SERVER), with or without TLS (TLS = off | on | ca), driven by
+-- Tests/DockerTest.sh:
 --   load    full load, values of all types, INSERT/UPDATE/DELETE over the stream
---   resume  restart continues from the stored GTID without a full load
+--   resume  restart continues from the stored GTID without a full load, a
+--           table whose space was emptied is loaded alone
 --   purge   the position is purged from the binlog: error 1236, full reload
 --   late    a fresh instance started before its space exists
 
@@ -22,6 +24,9 @@ local phase  = arg[1]
 local HOST   = os.getenv('SERVER_HOST') or 'mirrorflayer-server'
 local SERVER = os.getenv('SERVER') or 'mariadb'
 local TLS    = os.getenv('TLS') or 'off'
+
+-- MariaDB alone or a node of Galera
+local MARIADB = SERVER ~= 'mysql'
 
 require('compat').binary_data_decoding = 'new'
 
@@ -202,7 +207,7 @@ local TYPES = {
 }
 
 -- UUID of MariaDB, versions 1 and 4 kept with their groups reversed, 7 as it is
-if SERVER == 'mariadb' then
+if MARIADB then
   for index, text in ipairs({ '6ccd780c-baba-1026-9564-5b8c656024db', 'f47ac10b-58cc-4372-a567-0e02b2c3d479',
                              '01890a5d-ac96-774b-bcce-b302099a8057' }) do
     table.insert(TYPES, { 'U' .. index, 'UUID', "'" .. text .. "'", uuid.fromstr(text) })
@@ -290,7 +295,7 @@ local function replicator(only_locations)
   local replica = MirrorFlayer.new({
     hosts = { 'mirrorflayer-nowhere:3306', HOST .. ':3306' },
     user = 'replica', password = 'secret', server = KEY,
-    heartbeat = 1, retry = 1, batch = 500,
+    heartbeat = 1, retry = 1, batch = 500, check = 1,
     tls = (TLS == 'on' and true) or (TLS == 'ca' and { ca = '/certs/ca.pem' }) or false
   })
   replica:map('Registry', 'Locations', 'GlobalLocations', { 'ID', 'Node', 'Kind', 'Link', 'Slot', 'Modified' })
@@ -482,11 +487,34 @@ local function load()
     check_types(5, 'stream', item.space, item.datetime, item.json, item.uuid)
     item.replica:stop()
   end
+
+  -- A node of Galera that leaves the cluster is left, and taken again when it is back
+  if SERVER == 'galera' then
+    ok(replica.connection ~= nil and replica.connection.galera == true, 'the node is known as one of Galera')
+    exec("SET GLOBAL wsrep_cluster_address = ''")
+    wait(function ()
+      -- Our check, or the node itself refusing its clients (1047)
+      local problem = tostring(replica:stat().error)
+      return replica:stat().status == 'waiting' and
+        (string.find(problem, 'not ready', 1, true) ~= nil or string.find(problem, 'WSREP', 1, true) ~= nil)
+    end, 'a node out of the cluster to be left')
+    ok(true, 'a node out of the cluster is left: %s', tostring(replica:stat().error))
+    exec("SET GLOBAL wsrep_cluster_address = 'gcomm://'")
+    wait(function ()
+      local _, rows = sql:query("SHOW GLOBAL STATUS LIKE 'wsrep_ready'")
+      return rows[1] ~= nil and rows[1][2] == 'ON'
+    end, 'the node back in its cluster')
+    exec("INSERT INTO Registry.Locations (ID, Node, Kind, Modified) VALUES (113, 3, 'G', '2026-08-09 10:11:12')")
+    caught_up(replica)
+    locations_equal('galera')
+  end
   replica:stop()
 end
 
 local function resume()
   setup_spaces()
+  -- Emptied while down: the table is loaded alone, without a full load
+  box.space.GlobalGateways:truncate()
   exec('USE Registry',
     "INSERT INTO Locations (ID, Node, Kind, Modified) SELECT seq, 5000, 'D', '2026-09-09 09:09:09' FROM " .. seq(201, 205),
     'DELETE FROM Locations WHERE ID = 101',
@@ -494,6 +522,8 @@ local function resume()
   local replica = replicator()
   caught_up(replica)
   ok(replica:stat().loads == 0 and journal.reset == 0, 'continued from the stored GTID without a full load')
+  ok(replica:stat().fills == 1 and box.space.GlobalGateways:count() == 3,
+    'the emptied GlobalGateways was loaded alone (%d fills, %d rows)', replica:stat().fills, box.space.GlobalGateways:count())
   ok(journal.insert == 5 and journal.delete == 1 and journal.update == 1, 'only the changes made while down were applied')
   locations_equal('resume')
   exec("INSERT INTO Registry.Locations (ID, Node, Kind, Modified) VALUES (300, 6, 'S', '2026-10-10 10:10:10')")
@@ -505,6 +535,15 @@ local function resume()
   wait(function () return replica:stat().loads == 1 end, 'full load after reload()')
   target = caught_up(replica)
   locations_equal('reload')
+  stored_position(replica, KEY, target)
+  -- With flush the spaces are emptied table by table and loaded again
+  replica:reload(true)
+  wait(function () return replica:stat().loads == 2 end, 'full load after reload(true)')
+  target = caught_up(replica)
+  locations_equal('reload with flush')
+  ok(box.space.GlobalProfiles:count() == 19999 and box.space.GlobalGateways:count() == 3,
+    'reload(true) filled the spaces again (%d profiles, %d gateways)', box.space.GlobalProfiles:count(),
+    box.space.GlobalGateways:count())
   stored_position(replica, KEY, target)
   replica:stop()
 end

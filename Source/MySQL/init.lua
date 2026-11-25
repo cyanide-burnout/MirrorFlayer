@@ -16,6 +16,8 @@
 -- A change is { source, operation, old, new }; operation is 'insert',
 -- 'update' or 'delete', old and new are rows in the order of source.columns.
 
+local clock = require('clock')
+
 local protocol = require('MirrorFlayer.MySQL.Protocol')
 local column   = require('MirrorFlayer.MySQL.Column')
 local binlog   = require('MirrorFlayer.MySQL.BinLog')
@@ -59,8 +61,31 @@ local function key(config)
   return config.server
 end
 
+-- A node of Galera is used only while it is ready and in the primary
+-- component: a node that is not answers its clients with error 1047 or has a
+-- stale binlog. Returns true for a node of Galera, raises for one not ready;
+-- a server without wsrep (MySQL, MariaDB alone) has nothing to check
+local function ready(connection)
+  local _, rows = connection:query("SHOW GLOBAL VARIABLES LIKE 'wsrep_on'")
+  if #rows == 0 or string.upper(tostring(rows[1][2])) ~= 'ON' then
+    return false
+  end
+  _, rows = connection:query('SHOW GLOBAL STATUS WHERE Variable_name IN ' ..
+    "('wsrep_ready', 'wsrep_cluster_status', 'wsrep_local_state_comment')")
+  local status = {}
+  for _, row in ipairs(rows) do
+    status[string.lower(row[1])] = tostring(row[2])
+  end
+  if status.wsrep_ready ~= 'ON' or status.wsrep_cluster_status ~= 'Primary' then
+    error(failure(string.format('the Galera node is not ready: wsrep_ready %s, cluster %s, state %s',
+      tostring(status.wsrep_ready), tostring(status.wsrep_cluster_status),
+      tostring(status.wsrep_local_state_comment))), 0)
+  end
+  return true
+end
+
 -- Connects to one host. config: user, password, timeout, tls, public_key,
--- server, heartbeat, datetime, json
+-- server, heartbeat, check, datetime, json, uuid
 local function connect(config, host, port)
   local connection = protocol.connect({
     host = host,
@@ -71,15 +96,21 @@ local function connect(config, host, port)
     tls = config.tls,
     public_key = config.public_key
   })
-  local status, problem = pcall(connection.query, connection, "SET time_zone = '+00:00'")
+  local status, galera = pcall(function ()
+    connection:query("SET time_zone = '+00:00'")
+    return ready(connection)
+  end)
   if not status then
     connection:close()
-    error(problem, 0)
+    error(galera, 0)
   end
   return setmetatable({
     config = config,
+    host = host,
+    port = port,
+    galera = galera,
     connection = connection,
-    version = connection.version,
+    version = connection.version .. (galera and ', Galera' or ''),
     secure = connection.secure == true,
     dialect = connection.mariadb and mariadb or gtid
   }, Session)
@@ -282,7 +313,15 @@ function Session:stream(state, sources, handler)
   handler:started()
 
   local timeout = self.config.heartbeat * 3
+  local checked = clock.time()
   while true do
+    -- A node of Galera is asked again whether it is ready, over a connection
+    -- of its own: one that left the primary component goes silent, it does
+    -- not break the stream
+    if self.galera and clock.time() - checked >= self.config.check then
+      connect(self.config, self.host, self.port):close()
+      checked = clock.time()
+    end
     local packet = connection:read_packet(timeout)
     local first  = string.byte(packet, 1)
     if first == 0xff then

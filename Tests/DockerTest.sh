@@ -3,9 +3,9 @@
 # wal_level=logical, and Tarantool 3 running Tests/MirrorFlayerTest.lua or
 # Tests/PostgreSQLTest.lua in phases.
 #
-#   SERVER=mariadb|mysql|postgresql
-#                          source (images mariadb:11.4, mysql:8.4, postgres:17;
-#                          SERVER_IMAGE overrides)
+#   SERVER=mariadb|galera|mysql|postgresql
+#                          source (images mariadb:11.4, the same as a node of
+#                          Galera, mysql:8.4, postgres:17; SERVER_IMAGE overrides)
 #   TLS=off|on|ca          replicator connection: plain, TLS without verification,
 #                          TLS verified against the CA of the server
 #
@@ -35,6 +35,16 @@ case "$SERVER" in
     set -- -e MARIADB_ROOT_PASSWORD=root "$SERVER_IMAGE" \
       --server-id=1 --log-bin=mysql-bin --binlog-format=ROW --binlog-row-image=FULL --binlog-checksum=CRC32
     ;;
+  galera)
+    SERVER_IMAGE=${SERVER_IMAGE:-mariadb:11.4}
+    CLIENT=mariadb
+    TEST=Tests/MirrorFlayerTest.lua
+    # A cluster of one node, bootstrapped by itself
+    set -- -e MARIADB_ROOT_PASSWORD=root "$SERVER_IMAGE" \
+      --server-id=1 --log-bin=mysql-bin --binlog-format=ROW --binlog-row-image=FULL --binlog-checksum=CRC32 \
+      --log-slave-updates --innodb-autoinc-lock-mode=2 --wsrep-on=ON --wsrep-provider=/usr/lib/galera/libgalera_smm.so \
+      --wsrep-cluster-address=gcomm:// --wsrep-cluster-name=mirrorflayer
+    ;;
   mysql)
     SERVER_IMAGE=${SERVER_IMAGE:-mysql:8.4}
     CLIENT=mysql
@@ -58,7 +68,7 @@ case "$SERVER" in
         -c ssl=on -c ssl_cert_file=/certs/server.pem -c ssl_key_file=/certs/server.key'
     ;;
   *)
-    echo "SERVER must be mariadb, mysql or postgresql" >&2
+    echo "SERVER must be mariadb, galera, mysql or postgresql" >&2
     exit 2
     ;;
 esac

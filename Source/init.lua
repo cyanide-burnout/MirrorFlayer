@@ -33,6 +33,7 @@ local DEFAULTS = {
   json = 'map',
   uuid = 'uuid',
   heartbeat = 10,
+  check = 30,
   timeout = 30,
   batch = 100,
   retry = 5
@@ -67,8 +68,9 @@ end
 -- when missing), position (space name), key (of the position, the server id
 -- of MySQL or the slot of PostgreSQL by default), name (in logs and metrics), datetime ('datetime' or
 -- 'number'), json ('map' or 'string'), uuid ('uuid', 'binary' or 'string'),
--- heartbeat (seconds), timeout (seconds), batch (rows per transaction), retry
--- (seconds between connection attempts)
+-- heartbeat (seconds), check (seconds between checks that a node of Galera
+-- is ready), timeout (seconds), batch (rows per transaction), retry (seconds
+-- between connection attempts)
 local function new(config)
   check(type(config) == 'table', 'config must be a table')
   local options = {}
@@ -84,6 +86,7 @@ local function new(config)
   check(type(options.name) == 'string', 'config.name must be a string')
   check(options.datetime == 'datetime' or options.datetime == 'number', "config.datetime must be 'datetime' or 'number'")
   check(options.json == 'map' or options.json == 'string', "config.json must be 'map' or 'string'")
+  check(type(options.check) == 'number' and options.check > 0, 'config.check must be a positive number of seconds')
   check(options.uuid == 'uuid' or options.uuid == 'binary' or options.uuid == 'string',
     "config.uuid must be 'uuid', 'binary' or 'string'")
   if options.tls == true then
@@ -113,7 +116,7 @@ local function new(config)
     sources = {},
     order = {},
     status = 'created',
-    stats = { transactions = 0, rows = 0, loads = 0, split = 0 }
+    stats = { transactions = 0, rows = 0, loads = 0, fills = 0, split = 0 }
   }, Replica)
 end
 
@@ -166,24 +169,36 @@ end
 
 -- Full load ------------------------------------------------------------------
 
+-- Loads one table over its targets; with flush its spaces are emptied first
+function Replica:fill(connection, source, flush)
+  if flush then
+    for _, target in ipairs(source.targets) do
+      if target.space ~= nil then
+        target.space:truncate()
+      end
+    end
+  end
+  local loader = store.load(source.targets, self.config.batch)
+  local aborts = store.aborts()
+  local count  = 0
+  connection:load(source, function (row)
+    loader:add(row)
+    count = count + 1
+  end)
+  local deleted = loader:finish()
+  self:say('info', '%s: %d rows loaded, %d written, %d stale rows deleted, %d aborted by triggers', source.id,
+    count, loader.written, deleted, store.aborts() - aborts)
+end
+
 -- Takes the position of the source first, then loads every table; changes
 -- made meanwhile come again from the stream and applying them is idempotent
 function Replica:load(connection)
   local state   = connection:position()
   local started = clock.time()
   self.status = 'loading'
-  self:say('info', 'full load at %s', state ~= '' and state or '(start)')
+  self:say('info', 'full load at %s%s', state ~= '' and state or '(start)', self.flush_needed and ', spaces emptied' or '')
   for _, source in ipairs(self.order) do
-    local loader = store.load(source.targets, self.config.batch)
-    local aborts = store.aborts()
-    local count  = 0
-    connection:load(source, function (row)
-      loader:add(row)
-      count = count + 1
-    end)
-    local deleted = loader:finish()
-    self:say('info', '%s: %d rows loaded, %d written, %d stale rows deleted, %d aborted by triggers', source.id,
-      count, loader.written, deleted, store.aborts() - aborts)
+    self:fill(connection, source, self.flush_needed)
   end
   store.transaction(function ()
     self.position:put(state, clock.time())
@@ -191,8 +206,38 @@ function Replica:load(connection)
   self.stats.loads = self.stats.loads + 1
   self.stats.position = state
   self.reload_needed = false
+  self.flush_needed  = false
   self:say('info', 'full load done in %.1f s', clock.time() - started)
   return state
+end
+
+-- True when the table has spaces among its targets and all of them are empty
+local function empty(source)
+  local spaces = 0
+  for _, target in ipairs(source.targets) do
+    if target.space ~= nil then
+      if target.space:len() > 0 then
+        return false
+      end
+      spaces = spaces + 1
+    end
+  end
+  return spaces > 0
+end
+
+-- Loads alone the tables whose spaces are all empty though the position is
+-- there (a space made anew or emptied by hand). The stream then comes from
+-- the older position over the newer rows and converges, applying is
+-- idempotent; the table may be empty at the source too, then it costs a query
+function Replica:refill(connection)
+  for _, source in ipairs(self.order) do
+    if empty(source) then
+      self.status = 'loading'
+      self:say('info', '%s: its spaces are empty, loading the table', source.id)
+      self:fill(connection, source)
+      self.stats.fills = self.stats.fills + 1
+    end
+  end
 end
 
 -- Stream -------------------------------------------------------------------------
@@ -299,6 +344,8 @@ function Replica:session(host, port)
   local state = self.position:get()
   if state == nil or self.reload_needed then
     state = self:load(connection)
+  else
+    self:refill(connection)
   end
   self.stats.position = state
   self.dirty = false
@@ -423,10 +470,13 @@ function Replica:stop()
 end
 
 -- Reloads every table: restarts the replication with a full load, written
--- over the spaces as usual, so they never go empty
-function Replica:reload()
+-- over the spaces, so they never go empty; rows gone from the source are
+-- deleted afterwards. With flush the spaces of each table are emptied
+-- (truncate, no on_replace triggers) right before it is loaded
+function Replica:reload(flush)
   check(self.fiber ~= nil, 'not started')
   self.reload_needed = true
+  self.flush_needed  = flush == true
   self:stop()
   return self:start()
 end
@@ -434,7 +484,8 @@ end
 -- Returns the state: status, host, position (of the source), event_time (source
 -- time of the last applied transaction), applied_time, lag (seconds between
 -- the two, 0 after a heartbeat), the counters transactions, rows, loads (full
--- loads), split and aborts, and the last error
+-- loads), fills (tables loaded alone into empty spaces), split and aborts, and
+-- the last error
 function Replica:stat()
   local stats = self.stats
   return {
@@ -449,6 +500,7 @@ function Replica:stat()
     transactions = stats.transactions,
     rows = stats.rows,
     loads = stats.loads,
+    fills = stats.fills,
     tls = stats.tls,
     split = stats.split,
     aborts = store.aborts(),
@@ -458,5 +510,5 @@ end
 
 return {
   new = new,
-  _VERSION = '2.0.0'
+  _VERSION = '2.1.0'
 }

@@ -46,6 +46,15 @@ Requirements on the source: `log_bin`, `binlog_format=ROW`,
 `binlog_row_image=FULL`, GTID (always on in MariaDB, `gtid_mode=ON` in
 MySQL). Tarantool 3.x (LuaJIT).
 
+* **Galera.** With `wsrep_on`, a node is used only while `wsrep_ready` is ON
+  and its cluster status `Primary`: on connect, and every `check` seconds
+  during the stream over a short connection of its own, since a node that
+  leaves the primary component goes silent rather than breaking the stream.
+  A node that is not ready is a failure like any other, the next host is
+  tried.
+* **Tables loaded alone.** A table whose spaces are all empty while a
+  position is stored is loaded by itself before the stream (`fills`); the
+  stream from the older position converges over it.
 * **Dialects.** The greeting tells MariaDB (`MariaDB` in the version) from
   MySQL, and `MirrorFlayer.MySQL.MariaDB` or `MirrorFlayer.MySQL.GTID` handles the GTID
   format, the GTID event and the stream request. A MariaDB GTID event says

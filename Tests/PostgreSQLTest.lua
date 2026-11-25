@@ -3,7 +3,8 @@
 -- (TLS = off | on | ca), driven by Tests/DockerTest.sh:
 --   load    full load in the snapshot of the slot, values of all types,
 --           INSERT/UPDATE/DELETE over pgoutput, TOAST values an update kept
---   resume  restart continues from the stored LSN without a full load
+--   resume  restart continues from the stored LSN without a full load, a
+--           table whose space was emptied is loaded alone
 --   purge   the slot is dropped while down: full reload
 --   late    a fresh instance started before its space exists
 
@@ -73,8 +74,25 @@ local function same(left, right)
   return encode(left) == encode(right)
 end
 
-local sql = protocol.connect({ host = HOST, port = 5432, user = 'postgres', password = 'root',
-  database = 'postgres', timeout = 30 })
+-- The server of a fresh container may still be starting: the readiness
+-- check of DockerTest.sh runs inside it, a client from outside retries
+local function open()
+  local deadline = fiber.clock() + 30
+  while true do
+    local status, connection = pcall(protocol.connect, { host = HOST, port = 5432, user = 'postgres',
+      password = 'root', database = 'postgres', timeout = 30 })
+    if status then
+      return connection
+    end
+    if fiber.clock() > deadline then
+      error(connection, 0)
+    end
+    log.info('waiting for the server: %s', tostring(connection))
+    fiber.sleep(1)
+  end
+end
+
+local sql = open()
 
 local function exec(...)
   for _, statement in ipairs({ ... }) do
@@ -493,6 +511,8 @@ end
 
 local function resume()
   setup_spaces()
+  -- Emptied while down: the table is loaded alone, without a full load
+  box.space.GlobalGateways:truncate()
   exec('INSERT INTO "Registry"."Locations" ("ID", "Node", "Kind", "Modified") ' ..
       "SELECT s, 5000, 'D', '2026-09-09 09:09:09+00' FROM generate_series(201, 205) s",
     'DELETE FROM "Registry"."Locations" WHERE "ID" = 101',
@@ -500,6 +520,8 @@ local function resume()
   local replica = replicator()
   caught_up(replica)
   ok(replica:stat().loads == 0 and journal.reset == 0, 'continued from the stored LSN without a full load')
+  ok(replica:stat().fills == 1 and box.space.GlobalGateways:count() == 3,
+    'the emptied GlobalGateways was loaded alone (%d fills, %d rows)', replica:stat().fills, box.space.GlobalGateways:count())
   ok(journal.insert == 5 and journal.delete == 1 and journal.update == 1, 'only the changes made while down were applied')
   locations_equal('resume')
   exec([[INSERT INTO "Registry"."Locations" ("ID", "Node", "Kind", "Modified") VALUES (300, 6, 'S', '2026-10-10 10:10:10+00')]])
@@ -511,6 +533,15 @@ local function resume()
   wait(function () return replica:stat().loads == 1 end, 'full load after reload()')
   target = caught_up(replica)
   locations_equal('reload')
+  stored_position(replica, KEY, target)
+  -- With flush the spaces are emptied table by table and loaded again
+  replica:reload(true)
+  wait(function () return replica:stat().loads == 2 end, 'full load after reload(true)')
+  target = caught_up(replica)
+  locations_equal('reload with flush')
+  ok(box.space.GlobalProfiles:count() == 19999 and box.space.GlobalGateways:count() == 3,
+    'reload(true) filled the spaces again (%d profiles, %d gateways)', box.space.GlobalProfiles:count(),
+    box.space.GlobalGateways:count())
   stored_position(replica, KEY, target)
   replica:stop()
 end
