@@ -28,7 +28,7 @@ local AUTH_SASL_FINAL = 12
 
 -- Reader over a string, big-endian -----------------------------------------------
 
-local Reader = {}
+local Reader   = {}
 Reader.__index = Reader
 
 local function reader(data)
@@ -47,7 +47,7 @@ end
 
 function Reader:u8()
   self:check(1)
-  local value = byte(self.data, self.position)
+  local value   = byte(self.data, self.position)
   self.position = self.position + 1
   return value
 end
@@ -95,7 +95,7 @@ end
 
 function Reader:bytes(n)
   self:check(n)
-  local value = sub(self.data, self.position, self.position + n - 1)
+  local value   = sub(self.data, self.position, self.position + n - 1)
   self.position = self.position + n
   return value
 end
@@ -105,13 +105,13 @@ function Reader:cstring()
   if stop == nil then
     fatal('string without its end')
   end
-  local value = sub(self.data, self.position, stop - 1)
+  local value   = sub(self.data, self.position, stop - 1)
   self.position = stop + 1
   return value
 end
 
 function Reader:rest()
-  local value = sub(self.data, self.position)
+  local value   = sub(self.data, self.position)
   self.position = #self.data + 1
   return value
 end
@@ -161,7 +161,7 @@ local function server_error(payload)
     end
     fields[char(code)] = data:cstring()
   end
-  local problem = failure(string.format('%s: %s', fields.S or 'ERROR', fields.M or 'unknown error'), fields.C)
+  local problem  = failure(string.format('%s: %s', fields.S or 'ERROR', fields.M or 'unknown error'), fields.C)
   problem.detail = fields.D
   return problem
 end
@@ -190,7 +190,7 @@ end
 
 -- Connection ---------------------------------------------------------------------
 
-local Connection = {}
+local Connection   = {}
 Connection.__index = Connection
 
 -- Reads one message: its type (a character) and payload
@@ -300,8 +300,8 @@ function Connection:ready()
     if kind == 'Z' then
       return
     elseif kind == 'S' then
-      local data = reader(payload)
-      local name = data:cstring()
+      local data            = reader(payload)
+      local name            = data:cstring()
       self.parameters[name] = data:cstring()
     elseif kind == 'E' then
       error(server_error(payload), 0)
@@ -325,7 +325,7 @@ function Connection:query(sql, each)
       local row   = {}
       for index = 1, count do
         local length = data:i32()
-        row[index] = length < 0 and NULL or data:bytes(length)
+        row[index]   = length < 0 and NULL or data:bytes(length)
       end
       if each ~= nil then
         each(row)
@@ -335,7 +335,7 @@ function Connection:query(sql, each)
     elseif kind == 'T' then
       local data  = reader(payload)
       local count = data:u16()
-      names = {}
+      names       = {}
       for index = 1, count do
         names[index] = data:cstring()
         data:bytes(18) -- table, column, type, size, modifier, format
@@ -352,8 +352,8 @@ function Connection:query(sql, each)
     elseif kind == 'W' or kind == 'H' then
       return names, rows, tag, true
     elseif kind == 'S' then
-      local data = reader(payload)
-      local name = data:cstring()
+      local data            = reader(payload)
+      local name            = data:cstring()
       self.parameters[name] = data:cstring()
     end
     -- EmptyQueryResponse, NoticeResponse, NotificationResponse
@@ -394,15 +394,15 @@ local function connect(options)
       self.secure = true
     end
     local parameters = {
-      user = options.user,
-      database = options.database or options.user,
-      application_name = 'MirrorFlayer',
-      client_encoding = 'UTF8',
-      DateStyle = 'ISO',
-      TimeZone = 'UTC',
-      IntervalStyle = 'iso_8601',
+      user               = options.user,
+      database           = options.database or options.user,
+      application_name   = 'MirrorFlayer',
+      client_encoding    = 'UTF8',
+      DateStyle          = 'ISO',
+      TimeZone           = 'UTC',
+      IntervalStyle      = 'iso_8601',
       extra_float_digits = '3',
-      bytea_output = 'hex'
+      bytea_output       = 'hex'
     }
     if options.replication then
       parameters.replication = 'database'
@@ -428,12 +428,12 @@ local function connect(options)
 end
 
 return {
-  connect = connect,
-  reader = reader,
+  connect      = connect,
+  reader       = reader,
   server_error = server_error,
-  literal = literal,
-  identifier = identifier,
-  i32 = i32,
-  i64 = i64,
-  u64 = u64
+  literal      = literal,
+  identifier   = identifier,
+  i32          = i32,
+  i64          = i64,
+  u64          = u64
 }

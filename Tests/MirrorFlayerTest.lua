@@ -372,7 +372,7 @@ local function locations_equal(what)
 end
 
 local function check_types(id, what, space, mode, json, ids)
-  space = space or 'Types'
+  space       = space or 'Types'
   local tuple = box.space[space]:get(id)
   if tuple == nil then
     ok(false, '%s: %s row %d is missing', what, space, id)
@@ -442,7 +442,7 @@ local function load()
     'a second replicator of the same position key is refused: %s', tostring(problem))
 
   local inserts = journal.insert
-  triggered = 0
+  triggered     = 0
   exec('USE Registry',
     'INSERT INTO Locations (ID, Node, Kind, Link, Slot, Modified) ' ..
       "SELECT seq, 3000, 'R', NULL, 1, '2026-05-06 07:08:09' FROM " .. seq(101, 110),

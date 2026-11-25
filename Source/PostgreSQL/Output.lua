@@ -85,14 +85,14 @@ local function decode(payload)
     if part == 'K' or part == 'O' then
       message.old  = tuple(data)
       message.full = part == 'O'
-      part = char(data:u8())
+      part         = char(data:u8())
     end
     message.new = tuple(data)
     return message
   elseif kind == 'D' then
     local message = { kind = kind, relation = data:u32() }
-    message.full = char(data:u8()) == 'O'
-    message.old  = tuple(data)
+    message.full  = char(data:u8()) == 'O'
+    message.old   = tuple(data)
     return message
   elseif kind == 'T' then
     local message = { kind = kind, relations = {} }
@@ -108,8 +108,8 @@ local function decode(payload)
 end
 
 return {
-  EPOCH = EPOCH,
-  lsn = lsn,
+  EPOCH  = EPOCH,
+  lsn    = lsn,
   format = format,
   decode = decode
 }

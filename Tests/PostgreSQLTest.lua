@@ -301,7 +301,7 @@ local KEY = 'mirrorflayer'
 
 local function settings(extra)
   local config = {
-    type = 'postgresql',
+    type  = 'postgresql',
     hosts = { 'mirrorflayer-nowhere:5432', HOST },
     user = 'replica', password = 'secret', database = 'postgres',
     heartbeat = 1, retry = 1, batch = 500,
@@ -380,7 +380,7 @@ local function locations_equal(what)
 end
 
 local function check_types(id, what, space, mode, json, ids)
-  space = space or 'Types'
+  space       = space or 'Types'
   local tuple = box.space[space]:get(id)
   if tuple == nil then
     ok(false, '%s: %s row %d is missing', what, space, id)
@@ -406,7 +406,7 @@ end
 
 local function stored_position(replica, key, target)
   wait(function ()
-    local tuple = box.space[replica.config.position]:get(key)
+    local tuple    = box.space[replica.config.position]:get(key)
     local position = tuple and lsn_of(tuple[2])
     return position ~= nil and position >= target
   end, 'stored position ' .. output.format(target))
@@ -440,7 +440,7 @@ local function load()
   stored_position(replica, KEY, target)
 
   local inserts = journal.insert
-  triggered = 0
+  triggered     = 0
   exec('INSERT INTO "Registry"."Locations" ("ID", "Node", "Kind", "Link", "Slot", "Modified") ' ..
       "SELECT s, 3000, 'R', NULL, 1, '2026-05-06 07:08:09+00' FROM generate_series(101, 110) s",
     [[UPDATE "Registry"."Locations" SET "Node" = 4000, "Kind" = 'X' WHERE "ID" BETWEEN 20 AND 29]],

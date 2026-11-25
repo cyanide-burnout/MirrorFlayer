@@ -13,7 +13,7 @@ local socket = require('socket')
 -- a buffer of the transport, so wait() knows whether data is already there
 local CHUNK = 65536
 
-local Transport = {}
+local Transport   = {}
 Transport.__index = Transport
 
 local function connect(host, port, timeout)
@@ -92,7 +92,7 @@ function Transport:read(n, timeout)
     end
     self.buffer, self.offset = table.concat(parts), 1
   end
-  local data = string.sub(self.buffer, self.offset, self.offset + n - 1)
+  local data  = string.sub(self.buffer, self.offset, self.offset + n - 1)
   self.offset = self.offset + n
   if self.offset > #self.buffer then
     self.buffer, self.offset = '', 1

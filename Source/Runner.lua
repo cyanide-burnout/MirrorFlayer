@@ -31,11 +31,11 @@ local log   = require('log')
 
 -- Source drivers by config.type
 local DRIVERS = {
-  mysql = 'MirrorFlayer.MySQL',
+  mysql      = 'MirrorFlayer.MySQL',
   postgresql = 'MirrorFlayer.PostgreSQL'
 }
 
-local Runner = {}
+local Runner   = {}
 Runner.__index = Runner
 
 local function address(text, default)
@@ -52,14 +52,14 @@ end
 -- specs: { id, database, table } of the mapped tables in their order
 local function new(config, specs, sink)
   local self = setmetatable({
-    config = config,
-    driver = require(DRIVERS[config.type]),
-    sink = sink,
+    config  = config,
+    driver  = require(DRIVERS[config.type]),
+    sink    = sink,
     sources = {},
-    order = {}
+    order   = {}
   }, Runner)
   for _, spec in ipairs(specs) do
-    local source = { id = spec.id, database = spec.database, table = spec.table }
+    local source            = { id = spec.id, database = spec.database, table = spec.table }
     self.sources[source.id] = source
     table.insert(self.order, source)
   end
@@ -77,7 +77,7 @@ function Runner:describe(connection, source)
   local columns = connection:describe(source)
   self.sink:columns(source.id, columns)
   source.columns = columns
-  source.stale = false
+  source.stale   = false
 end
 
 -- Describes a table again over a connection of its own while the stream
@@ -172,7 +172,7 @@ end
 function Runner:session(host, port)
   self.sink:bind()
   local connection = self.driver.connect(self.config, host, port)
-  self.connection = connection
+  self.connection  = connection
   self.host, self.port = host, port
   self.sink:report({ host = host, port = port, tls = connection.secure == true })
   self:say('info', 'connected to %s:%d, %s%s', host, port, connection.version, connection.secure and ', TLS' or '')
@@ -246,7 +246,7 @@ end
 
 function Runner:start()
   self.stopping = false
-  self.fiber = fiber.new(self.loop, self)
+  self.fiber    = fiber.new(self.loop, self)
   self.fiber:name('MirrorFlayer:' .. self.config.name, { truncate = true })
   self.fiber:set_joinable(true)
   return self.fiber
@@ -266,5 +266,5 @@ end
 
 return {
   DRIVERS = DRIVERS,
-  new = new
+  new     = new
 }

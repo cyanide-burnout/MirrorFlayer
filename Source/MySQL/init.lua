@@ -46,7 +46,7 @@ local UNSUPPORTED = {
   [E.XA_PREPARE] = 'XA transactions are not supported'
 }
 
-local Session = {}
+local Session   = {}
 Session.__index = Session
 
 -- Checks the settings of the driver; returns a message when they are wrong
@@ -88,12 +88,12 @@ end
 -- server, heartbeat, check, datetime, json, uuid
 local function connect(config, host, port)
   local connection = protocol.connect({
-    host = host,
-    port = port,
-    user = config.user,
-    password = config.password,
-    timeout = config.timeout,
-    tls = config.tls,
+    host       = host,
+    port       = port,
+    user       = config.user,
+    password   = config.password,
+    timeout    = config.timeout,
+    tls        = config.tls,
     public_key = config.public_key
   })
   local status, galera = pcall(function ()
@@ -105,14 +105,14 @@ local function connect(config, host, port)
     error(galera, 0)
   end
   return setmetatable({
-    config = config,
-    host = host,
-    port = port,
-    galera = galera,
+    config     = config,
+    host       = host,
+    port       = port,
+    galera     = galera,
     connection = connection,
-    version = connection.version .. (galera and ', Galera' or ''),
-    secure = connection.secure == true,
-    dialect = connection.mariadb and mariadb or gtid
+    version    = connection.version .. (galera and ', Galera' or ''),
+    secure     = connection.secure == true,
+    dialect    = connection.mariadb and mariadb or gtid
   }, Session)
 end
 
@@ -201,7 +201,7 @@ end
 -- Hands a finished transaction to the engine with its position
 function Session:commit(header)
   local transaction = self.transaction
-  self.transaction = nil
+  self.transaction  = nil
   if transaction == nil then
     return
   end
@@ -223,7 +223,7 @@ function Session:event(packet)
       self.handler:say('warn', 'transaction %s has no end, dropped', self.transaction.gtid)
     end
     transaction.changes = {}
-    self.transaction = transaction
+    self.transaction    = transaction
   elseif type == E.TABLE_MAP then
     local map    = binlog.table_map(header)
     local source = self.sources[map.schema .. '.' .. map.table]
@@ -238,7 +238,7 @@ function Session:event(packet)
       -- The binlog predates the current table definition
       errors.reload('%s: binlog has %d columns, table has %d; reloading', source.id, #map.types, #source.columns)
     end
-    map.source = source
+    map.source        = source
     self.maps[map.id] = map
   elseif binlog.ROWS[type] ~= nil then
     local map = self.maps[binlog.rows_table(header)]
@@ -306,8 +306,8 @@ function Session:stream(state, sources, handler)
   self.maps        = {}
   self.transaction = nil
   self.checksum    = self.dialect.request(connection, {
-    state = state,
-    server = self.config.server,
+    state     = state,
+    server    = self.config.server,
     heartbeat = self.config.heartbeat
   })
   handler:started()
@@ -342,8 +342,8 @@ function Session:stream(state, sources, handler)
 end
 
 return {
-  PORT = 3306,
-  check = check,
-  key = key,
+  PORT    = 3306,
+  check   = check,
+  key     = key,
   connect = connect
 }

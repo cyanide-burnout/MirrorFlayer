@@ -14,7 +14,7 @@ local UNCHANGED = convert.UNCHANGED
 
 -- Targets --------------------------------------------------------------------
 
-local Target = {}
+local Target   = {}
 Target.__index = Target
 
 -- spec is a space name or function (operation, old, new); columns are the
@@ -37,7 +37,7 @@ local function target(spec, columns)
       errors.fatal('space %s has no primary index', spec)
     end
     self.space = space
-    self.name = spec
+    self.name  = spec
     if columns == nil then
       columns = {}
       for index, field in ipairs(space:format()) do
@@ -48,7 +48,7 @@ local function target(spec, columns)
       end
     end
     self.parts = space.index[0].parts
-    self.key = {}
+    self.key   = {}
     for index, part in ipairs(self.parts) do
       if type(part.fieldno) ~= 'number' or part.fieldno > #columns then
         errors.fatal('space %s: key part %d is not among the mapped columns', spec, index)
@@ -267,7 +267,7 @@ end
 -- afterwards, so the space never goes empty. Rows equal to the stored tuples
 -- are not written, so their triggers do not fire. Function targets get
 -- 'reset' first and then 'insert' for each row.
-local Load = {}
+local Load   = {}
 Load.__index = Load
 
 local function load(targets, batch)
@@ -292,7 +292,7 @@ function Load:write(row)
     else
       local stored = item.space:get(item:keyof(tuple))
       if stored == nil or msgpack.encode(stored) ~= msgpack.encode(tuple) then
-        stored = item.space:replace(tuple)
+        stored       = item.space:replace(tuple)
         self.written = self.written + 1
       end
       self.seen[index][msgpack.encode(item.definition:extract_key(stored))] = true
@@ -352,7 +352,7 @@ end
 
 -- Position -------------------------------------------------------------------
 
-local Position = {}
+local Position   = {}
 Position.__index = Position
 
 local NUMERIC = { unsigned = true, integer = true, number = true }
@@ -401,11 +401,11 @@ function Position:put(state, time)
 end
 
 return {
-  target = target,
-  load = load,
+  target      = target,
+  load        = load,
   transaction = transaction,
-  apply = apply,
-  configure = configure,
-  aborts = function () return pace.aborts end,
-  position = position
+  apply       = apply,
+  configure   = configure,
+  aborts      = function () return pace.aborts end,
+  position    = position
 }

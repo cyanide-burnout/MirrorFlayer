@@ -158,18 +158,18 @@ local function new(name, data_type, kind, config)
 end
 
 return {
-  NULL = NULL,
-  UNCHANGED = UNCHANGED,
-  binary = binary,
-  integer = integer,
-  float = float,
-  moment = moment,
-  instant = instant,
-  duration = duration,
-  clock = clock,
-  temporal = temporal,
-  document = document,
-  identity = identity,
+  NULL       = NULL,
+  UNCHANGED  = UNCHANGED,
+  binary     = binary,
+  integer    = integer,
+  float      = float,
+  moment     = moment,
+  instant    = instant,
+  duration   = duration,
+  clock      = clock,
+  temporal   = temporal,
+  document   = document,
+  identity   = identity,
   identifier = identifier,
-  new = new
+  new        = new
 }

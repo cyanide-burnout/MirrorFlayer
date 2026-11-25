@@ -24,22 +24,22 @@ local Runner = require('MirrorFlayer.Runner')
 local DRIVERS = Runner.DRIVERS
 
 local DEFAULTS = {
-  type = 'mysql',
-  name = 'MirrorFlayer',
-  position = 'ReplicatorPositions',
-  tls = false,
-  datetime = 'datetime',
-  json = 'map',
-  uuid = 'uuid',
+  type      = 'mysql',
+  name      = 'MirrorFlayer',
+  position  = 'ReplicatorPositions',
+  tls       = false,
+  datetime  = 'datetime',
+  json      = 'map',
+  uuid      = 'uuid',
   heartbeat = 10,
-  check = 30,
-  timeout = 30,
-  batch = 100,
-  retry = 5,
+  check     = 30,
+  timeout   = 30,
+  batch     = 100,
+  retry     = 5,
   thread_id = 1
 }
 
-local Replica = {}
+local Replica   = {}
 Replica.__index = Replica
 
 -- Replicators running in this instance: by the name, by the position space
@@ -114,13 +114,13 @@ local function new(config)
   check((type(options.key) == 'number' and options.key >= 0 and options.key == math.floor(options.key)) or
     type(options.key) == 'string', 'config.key must be an unsigned integer or a string')
   return setmetatable({
-    config = options,
-    driver = driver,
+    config  = options,
+    driver  = driver,
     sources = {},
-    order = {},
+    order   = {},
     loaders = {},
-    status = 'created',
-    stats = { transactions = 0, rows = 0, loads = 0, fills = 0, split = 0 }
+    status  = 'created',
+    stats   = { transactions = 0, rows = 0, loads = 0, fills = 0, split = 0 }
   }, Replica)
 end
 
@@ -136,7 +136,7 @@ function Replica:map(database, table_name, target, columns)
   local id     = database .. '.' .. table_name
   local source = self.sources[id]
   if source == nil then
-    source = { id = id, database = database, table = table_name, specs = {} }
+    source           = { id = id, database = database, table = table_name, specs = {} }
     self.sources[id] = source
     table.insert(self.order, source)
   end
@@ -225,9 +225,9 @@ end
 
 -- Returns rows written, stale rows deleted, transactions aborted by triggers
 function Replica:load_finish(id)
-  local item = self.loaders[id]
+  local item       = self.loaders[id]
   self.loaders[id] = nil
-  local deleted = item.loader:finish()
+  local deleted    = item.loader:finish()
   return item.loader.written, deleted, store.aborts() - item.aborts
 end
 
@@ -247,7 +247,7 @@ end
 
 function Replica:resume(state)
   self.stats.position = state
-  self.dirty = false
+  self.dirty          = false
 end
 
 -- status, error (an empty string clears it), host, port, tls
@@ -281,13 +281,13 @@ function Replica:flush()
   store.transaction(function ()
     self.positions:put(self.stats.position, self.stats.event_time or 0)
   end)
-  self.dirty = false
+  self.dirty  = false
   self.stored = clock.time()
 end
 
 -- The driver has asked the source for the stream
 function Replica:started()
-  self.status = 'streaming'
+  self.status      = 'streaming'
   self.stats.error = nil
 end
 
@@ -295,7 +295,7 @@ end
 -- PostgreSQL); the position is written at most once a second
 function Replica:advance(state)
   self.stats.position = state
-  self.dirty = true
+  self.dirty          = true
   if clock.time() - (self.stored or 0) >= 1 then
     self:flush()
   end
@@ -303,7 +303,7 @@ end
 
 function Replica:heartbeat()
   self.stats.heartbeat_time = clock.time()
-  self.stats.lag = 0
+  self.stats.lag            = 0
   self:flush()
 end
 
@@ -313,8 +313,8 @@ end
 -- move the position, which is written at most once a second. A change is
 -- { table id, operation, old, new }
 function Replica:commit(changes, state, event_time)
-  local stats = self.stats
-  stats.position = state
+  local stats      = self.stats
+  stats.position   = state
   stats.event_time = event_time
   if #changes == 0 then
     self.dirty = true
@@ -337,12 +337,12 @@ function Replica:commit(changes, state, event_time)
   if not atomic then
     stats.split = stats.split + 1
   end
-  self.dirty = false
-  self.stored = clock.time()
+  self.dirty         = false
+  self.stored        = clock.time()
   stats.applied_time = self.stored
-  stats.lag = math.max(0, self.stored - event_time)
+  stats.lag          = math.max(0, self.stored - event_time)
   stats.transactions = stats.transactions + 1
-  stats.rows = stats.rows + #changes
+  stats.rows         = stats.rows + #changes
 end
 
 -- Metrics ----------------------------------------------------------------------
@@ -361,8 +361,8 @@ function Replica:register()
     return
   end
   self.gauges = {
-    lag = metrics.gauge('mirrorflayer_lag_seconds', 'Delay of the last applied source transaction'),
-    event = metrics.gauge('mirrorflayer_event_timestamp_seconds', 'Source time of the last applied source transaction'),
+    lag     = metrics.gauge('mirrorflayer_lag_seconds', 'Delay of the last applied source transaction'),
+    event   = metrics.gauge('mirrorflayer_event_timestamp_seconds', 'Source time of the last applied source transaction'),
     applied = metrics.gauge('mirrorflayer_applied_timestamp_seconds', 'Local time of the last applied source transaction')
   }
   self.callback = function () self:collect() end
@@ -396,7 +396,7 @@ function Replica:start()
     tostring(config.key))
   local thread
   if config.thread ~= nil then
-    thread = require('MirrorFlayer.Thread')
+    thread  = require('MirrorFlayer.Thread')
     problem = thread.check(config.thread, config.thread_id)
     check(problem == nil, '%s', problem)
   end
@@ -416,9 +416,9 @@ function Replica:start()
     self.runner = Runner.new(config, specs, self)
     self.fiber  = self.runner:start()
   end
-  self.running = true
+  self.running               = true
   running.names[config.name] = self
-  running.keys[slot(config)]  = self
+  running.keys[slot(config)] = self
   return self
 end
 
@@ -433,9 +433,9 @@ function Replica:stop()
     self.runner:stop()
     self.fiber = nil
   end
-  self.running = false
+  self.running                    = false
   running.names[self.config.name] = nil
-  running.keys[slot(self.config)]  = nil
+  running.keys[slot(self.config)] = nil
   self:cleanup()
   self:unregister()
   self.status = 'stopped'
@@ -461,26 +461,26 @@ end
 function Replica:stat()
   local stats = self.stats
   return {
-    name = self.config.name,
-    status = self.status,
-    host = self.host and string.format('%s:%d', self.host, self.port) or nil,
-    position = stats.position,
-    event_time = stats.event_time,
-    applied_time = stats.applied_time,
+    name           = self.config.name,
+    status         = self.status,
+    host           = self.host and string.format('%s:%d', self.host, self.port) or nil,
+    position       = stats.position,
+    event_time     = stats.event_time,
+    applied_time   = stats.applied_time,
     heartbeat_time = stats.heartbeat_time,
-    lag = stats.lag,
-    transactions = stats.transactions,
-    rows = stats.rows,
-    loads = stats.loads,
-    fills = stats.fills,
-    tls = stats.tls,
-    split = stats.split,
-    aborts = store.aborts(),
-    error = stats.error
+    lag            = stats.lag,
+    transactions   = stats.transactions,
+    rows           = stats.rows,
+    loads          = stats.loads,
+    fills          = stats.fills,
+    tls            = stats.tls,
+    split          = stats.split,
+    aborts         = store.aborts(),
+    error          = stats.error
   }
 end
 
 return {
-  new = new,
+  new      = new,
   _VERSION = '2.2.1'
 }

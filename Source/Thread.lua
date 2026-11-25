@@ -39,7 +39,7 @@ local runners = {}
 
 local function raise(problem)
   if type(problem) == 'table' then
-    local failure = errors.failure(problem.message or 'unknown error', problem.code, problem.fatal)
+    local failure  = errors.failure(problem.message or 'unknown error', problem.code, problem.fatal)
     failure.reload = problem.reload
     error(failure, 0)
   end
@@ -196,7 +196,7 @@ local function launch(replica, specs)
   local config = replica.config
   export()
   replicas[config.name] = replica
-  local results = eval(config.thread, 'start', config.name,
+  local results         = eval(config.thread, 'start', config.name,
     { config = config, sources = specs, thread_id = config.thread_id })
   for _, result in ipairs(results) do
     if result[1] == true then
@@ -230,10 +230,10 @@ local function check(group, thread_id)
 end
 
 return {
-  start = start,
-  stop = stop,
-  launch = launch,
-  halt = halt,
-  check = check,
+  start    = start,
+  stop     = stop,
+  launch   = launch,
+  halt     = halt,
+  check    = check,
   replicas = replicas
 }

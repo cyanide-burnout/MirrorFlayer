@@ -35,7 +35,7 @@ local PUBLICATION = 'mirrorflayer'
 -- SQLSTATE of an object that does not exist (a slot among others)
 local UNDEFINED_OBJECT = '42704'
 
-local Session = {}
+local Session   = {}
 Session.__index = Session
 
 local function slot(config)
@@ -63,13 +63,13 @@ end
 
 local function open(config, host, port, replication)
   return protocol.connect({
-    host = host,
-    port = port,
-    user = config.user,
-    password = config.password,
-    database = config.database,
-    timeout = config.timeout,
-    tls = config.tls,
+    host        = host,
+    port        = port,
+    user        = config.user,
+    password    = config.password,
+    database    = config.database,
+    timeout     = config.timeout,
+    tls         = config.tls,
     replication = replication
   })
 end
@@ -79,13 +79,13 @@ end
 local function connect(config, host, port)
   local connection = open(config, host, port, true)
   return setmetatable({
-    config = config,
-    host = host,
-    port = port,
-    connection = connection,
-    version = connection.version,
-    secure = connection.secure == true,
-    slot = slot(config),
+    config      = config,
+    host        = host,
+    port        = port,
+    connection  = connection,
+    version     = connection.version,
+    secure      = connection.secure == true,
+    slot        = slot(config),
     publication = config.publication or PUBLICATION
   }, Session)
 end
@@ -177,7 +177,7 @@ end
 -- columns of the source. The table is described again when they differ; a
 -- relation that still differs predates the table, which asks for a full load
 function Session:relation(message)
-  local source = self.sources[message.namespace .. '.' .. message.name]
+  local source                     = self.sources[message.namespace .. '.' .. message.name]
   self.relations[message.relation] = message
   if source == nil then
     return
@@ -273,7 +273,7 @@ function Session:message(payload)
     self.transaction = { changes = {} }
   elseif kind == 'C' then
     local transaction = self.transaction
-    self.transaction = nil
+    self.transaction  = nil
     if transaction == nil then
       return
     end
@@ -299,8 +299,8 @@ end
 -- A keepalive: everything before its LSN has been sent, so outside of a
 -- transaction the position moves there
 function Session:keepalive(payload)
-  local data  = protocol.reader(payload)
-  local stop  = data:u64()
+  local data = protocol.reader(payload)
+  local stop = data:u64()
   data:i64()
   local reply = data:u8() == 1
   if self.transaction == nil and stop > self.confirmed then
@@ -387,8 +387,8 @@ function Session:stream(state, sources, handler)
 end
 
 return {
-  PORT = 5432,
-  check = check,
-  key = key,
+  PORT    = 5432,
+  check   = check,
+  key     = key,
   connect = connect
 }

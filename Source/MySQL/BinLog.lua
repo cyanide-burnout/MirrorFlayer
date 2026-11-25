@@ -68,24 +68,24 @@ local function event(packet, checksum)
   local data   = protocol.reader(packet)
   local header = {
     timestamp = data:u32(),
-    type = data:u8(),
-    server = data:u32(),
-    size = data:u32(),
-    position = data:u32(),
-    flags = data:u16()
+    type      = data:u8(),
+    server    = data:u32(),
+    size      = data:u32(),
+    position  = data:u32(),
+    flags     = data:u16()
   }
   local limit = #packet
 
   if header.type == E.FORMAT_DESCRIPTION then
     -- Always carries the algorithm byte and four checksum bytes
     header.checksum = string.byte(packet, limit - 4)
-    checksum = header.checksum == 1
+    checksum        = header.checksum == 1
   end
 
   if checksum and header.type ~= E.HEARTBEAT and header.type ~= E.HEARTBEAT_V2 then
-    local stored = data.limit - 3
+    local stored  = data.limit - 3
     data.position = stored
-    stored = tobit(data:u32())
+    stored        = tobit(data:u32())
     if stored ~= crc32(packet, limit - 4) then
       error(protocol.failure(string.format('binlog event %d at %d: checksum mismatch', header.type, header.position)), 0)
     end
@@ -97,7 +97,7 @@ local function event(packet, checksum)
   if header.type == E.FORMAT_DESCRIPTION then
     limit = limit - 1
   end
-  data.limit = limit
+  data.limit  = limit
   header.data = data
   return header
 end
@@ -142,14 +142,14 @@ local function table_map(header)
   data:skip(1)
   result.table = data:bytes(data:u8())
   data:skip(1)
-  local count = data:lenenc()
+  local count  = data:lenenc()
   result.types = {}
   for index = 1, count do
     result.types[index] = data:u8()
   end
   local length = data:lenenc()
   local stop   = data.position + length
-  result.meta = {}
+  result.meta  = {}
   for index = 1, count do
     result.meta[index] = column.meta(data, result.types[index])
   end
@@ -159,9 +159,9 @@ end
 
 -- Table id of a rows event, to look up the table map before decoding
 local function rows_table(header)
-  local data  = header.data
-  local saved = data.position
-  local id    = data:u48()
+  local data    = header.data
+  local saved   = data.position
+  local id      = data:u48()
   data.position = saved
   return id
 end
@@ -238,14 +238,14 @@ local function rows(header, map, columns)
 end
 
 return {
-  E = E,
-  ROWS = ROWS,
-  crc32 = crc32,
-  event = event,
-  rotate = rotate,
-  query = query,
-  xid = xid,
-  table_map = table_map,
+  E          = E,
+  ROWS       = ROWS,
+  crc32      = crc32,
+  event      = event,
+  rotate     = rotate,
+  query      = query,
+  xid        = xid,
+  table_map  = table_map,
   rows_table = rows_table,
-  rows = rows
+  rows       = rows
 }

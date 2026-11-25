@@ -66,8 +66,8 @@ local function gtid(header)
   local domain   = data:u32()
   local flags    = data:u8()
   return {
-    domain = domain,
-    gtid = string.format('%d-%d-%s', domain, header.server, digits(sequence)),
+    domain     = domain,
+    gtid       = string.format('%d-%d-%s', domain, header.server, digits(sequence)),
     standalone = bit.band(flags, FL_STANDALONE) ~= 0
   }
 end
@@ -88,10 +88,10 @@ local function request(connection, options)
 end
 
 return {
-  add = add,
+  add      = add,
   position = position,
-  parse = parse,
-  format = format,
-  gtid = gtid,
-  request = request
+  parse    = parse,
+  format   = format,
+  gtid     = gtid,
+  request  = request
 }

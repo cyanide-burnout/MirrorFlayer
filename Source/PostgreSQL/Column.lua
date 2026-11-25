@@ -57,7 +57,7 @@ local function interval(column, text)
   end
   for value, unit in string.gmatch(time, '(%-?[%d%.]+)([HMS])') do
     local number = tonumber(value)
-    seconds = seconds + number * UNITS[unit]
+    seconds      = seconds + number * UNITS[unit]
     if unit == 'S' then
       local whole = number < 0 and -math.floor(-number) or math.floor(number)
       fields.sec  = whole
@@ -82,11 +82,11 @@ local function hex(text)
 end
 
 local TEXT = {
-  boolean  = function (column, text) return text == 't' end,
-  integer  = function (column, text) return convert.integer(text) end,
-  float    = function (column, text) return SPECIAL[text] or convert.float(tonumber(text)) end,
-  double   = function (column, text) return SPECIAL[text] or tonumber(text) end,
-  decimal  = function (column, text)
+  boolean = function (column, text) return text == 't' end,
+  integer = function (column, text) return convert.integer(text) end,
+  float   = function (column, text) return SPECIAL[text] or convert.float(tonumber(text)) end,
+  double  = function (column, text) return SPECIAL[text] or tonumber(text) end,
+  decimal = function (column, text)
     if SPECIAL[text] ~= nil then
       return NULL
     end
@@ -120,11 +120,11 @@ local function describe(name, oid, base, type_name, type_type, category, config)
     kind = 'string'
   end
   local column = convert.new(name, type_name, kind, config)
-  column.oid = tonumber(oid)
+  column.oid   = tonumber(oid)
   return column
 end
 
 return {
-  text = text,
+  text     = text,
   describe = describe
 }

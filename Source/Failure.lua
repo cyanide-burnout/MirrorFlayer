@@ -3,8 +3,8 @@
 -- replicator instead of reconnecting; reload makes the next connection start
 -- with a full load (the position is lost, the table changed under the stream)
 
-local Failure = {}
-Failure.__index = Failure
+local Failure      = {}
+Failure.__index    = Failure
 Failure.__tostring = function (self)
   if self.code ~= nil then
     return string.format('%s (%s)', self.message, tostring(self.code))
@@ -23,13 +23,13 @@ end
 
 -- Raises a failure that asks for a full load
 local function reload(format, ...)
-  local problem = failure(string.format(format, ...))
+  local problem  = failure(string.format(format, ...))
   problem.reload = true
   error(problem, 0)
 end
 
 return {
   failure = failure,
-  fatal = fatal,
-  reload = reload
+  fatal   = fatal,
+  reload  = reload
 }

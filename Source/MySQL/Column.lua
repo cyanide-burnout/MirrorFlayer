@@ -2,10 +2,10 @@
 -- result set of the full load and for binlog row images, so both paths give
 -- the same values. The values themselves are made by MirrorFlayer.Column.
 
-local ffi      = require('ffi')
-local bit      = require('bit')
-local uuid     = require('uuid')
-local decimal  = require('decimal')
+local ffi     = require('ffi')
+local bit     = require('bit')
+local uuid    = require('uuid')
+local decimal = require('decimal')
 
 local protocol = require('MirrorFlayer.MySQL.Protocol')
 local convert  = require('MirrorFlayer.Column')
@@ -141,8 +141,8 @@ local function newdecimal(data, precision, scale)
   end
   stream = protocol.reader(table.concat(buffer))
 
-  parts = { negative and '-' or '' }
-  value = DIGITS[wholex] > 0 and stream:be(DIGITS[wholex]) or 0
+  parts        = { negative and '-' or '' }
+  value        = DIGITS[wholex] > 0 and stream:be(DIGITS[wholex]) or 0
   local digits = tostring(value)
   for _ = 1, whole9 do
     digits = digits .. format('%09d', stream:be(4))
@@ -188,8 +188,8 @@ local function time2(data, precision)
     packed = whole * 0x1000000 + part * (size == 1 and 10000 or size == 2 and 100 or 0)
   end
   local negative = packed < 0
-  packed = math.abs(packed)
-  local whole = math.floor(packed / 0x1000000)
+  packed         = math.abs(packed)
+  local whole    = math.floor(packed / 0x1000000)
   return negative, math.floor(whole / 0x1000) % 0x400, math.floor(whole / 64) % 64, whole % 64, packed % 0x1000000
 end
 
@@ -233,7 +233,7 @@ local function json_varlen(data)
   local value, shift = 0, 1
   for _ = 1, 5 do
     local octet = data:u8()
-    value = value + (octet % 0x80) * shift
+    value       = value + (octet % 0x80) * shift
     if octet < 0x80 then
       return value
     end
@@ -265,10 +265,10 @@ local function json_entry(data, base, large)
   if large and kind == J.UINT32 then
     return data:u32()
   end
-  local offset = large and data:u32() or data:u16()
-  local saved  = data.position
+  local offset  = large and data:u32() or data:u16()
+  local saved   = data.position
   data.position = base + offset
-  value = json_value(data, kind)
+  value         = json_value(data, kind)
   data.position = saved
   return value
 end
@@ -285,7 +285,7 @@ local function json_container(data, kind)
     for index = 1, count do
       local offset = large and data:u32() or data:u16()
       local length = data:u16()
-      keys[index] = sub(data.data, base + offset, base + offset + length - 1)
+      keys[index]  = sub(data.data, base + offset, base + offset + length - 1)
     end
   end
   for index = 1, count do
@@ -393,10 +393,10 @@ local function text_entry(data, base, large)
   if large and kind == J.UINT32 then
     return integer_text(data:u32())
   end
-  local offset = large and data:u32() or data:u16()
-  local saved  = data.position
+  local offset  = large and data:u32() or data:u16()
+  local saved   = data.position
   data.position = base + offset
-  value = text_value(data, kind)
+  value         = text_value(data, kind)
   data.position = saved
   return value
 end
@@ -413,7 +413,7 @@ local function text_container(data, kind)
     for index = 1, count do
       local offset = large and data:u32() or data:u16()
       local length = data:u16()
-      keys[index] = sub(data.data, base + offset, base + offset + length - 1)
+      keys[index]  = sub(data.data, base + offset, base + offset + length - 1)
     end
   end
   for index = 1, count do
@@ -532,7 +532,7 @@ local function decode(data, column, type, info)
     return moment(column, math.floor(day / 10000), math.floor(day / 100) % 100, day % 100,
       math.floor(time / 10000), math.floor(time / 100) % 100, time % 100, 0)
   elseif type == T.DATETIME2 then
-    value = data:be(5) - 0x8000000000
+    value      = data:be(5) - 0x8000000000
     local usec = fraction(data, info)
     local ymd, hms = math.floor(value / 0x20000), value % 0x20000
     local ym = math.floor(ymd / 32)
@@ -544,9 +544,9 @@ local function decode(data, column, type, info)
     value = data:be(4)
     return instant(column, value, fraction(data, info))
   elseif type == T.TIME then
-    value = data:int(3)
+    value          = data:int(3)
     local negative = value < 0
-    value = math.abs(value)
+    value          = math.abs(value)
     return duration(column, negative, math.floor(value / 10000), math.floor(value / 100) % 100, value % 100, 0)
   elseif type == T.TIME2 then
     return duration(column, time2(data, info))
@@ -560,14 +560,14 @@ local function decode(data, column, type, info)
     local real, length = info[1], info[2]
     if band(real, 0x30) ~= 0x30 then
       length = bor(length, lshift(bxor(band(real, 0x30), 0x30), 4))
-      real = bor(real, 0x30)
+      real   = bor(real, 0x30)
     end
     if real == T.ENUM or real == T.SET then
       high = length
       if high <= 4 then
         value = high == 1 and data:u8() or high == 2 and data:u16() or high == 3 and data:u24() or data:u32()
       else
-        value = data:u32() + data:u32() * 0x100000000
+        value         = data:u32() + data:u32() * 0x100000000
         data.position = data.position - 8 + high
       end
       return enumeration(column, value)
@@ -628,8 +628,8 @@ end
 -- Builds a column from a row of information_schema.COLUMNS:
 -- COLUMN_NAME, DATA_TYPE, COLUMN_TYPE; config gives the datetime and json modes
 local function describe(name, data_type, column_type, config)
-  local kind   = KINDS[string.lower(data_type)]
-  local column = convert.new(name, string.lower(data_type), kind, config)
+  local kind      = KINDS[string.lower(data_type)]
+  local column    = convert.new(name, string.lower(data_type), kind, config)
   column.unsigned = string.find(string.lower(column_type), 'unsigned', 1, true) ~= nil
   if kind == 'enum' or kind == 'set' then
     column.values = values(column_type)
@@ -638,9 +638,9 @@ local function describe(name, data_type, column_type, config)
 end
 
 return {
-  T = T,
-  meta = meta,
-  text = text,
-  decode = decode,
+  T        = T,
+  meta     = meta,
+  text     = text,
+  decode   = decode,
   describe = describe
 }

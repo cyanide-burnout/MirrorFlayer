@@ -33,15 +33,15 @@ local failure, fatal = errors.failure, errors.fatal
 
 -- Reader over a string -------------------------------------------------------
 
-local Reader = {}
+local Reader   = {}
 Reader.__index = Reader
 
 local function reader(data, position, limit)
   return setmetatable({
-    data = data,
-    pointer = ffi.cast('const uint8_t *', data),
+    data     = data,
+    pointer  = ffi.cast('const uint8_t *', data),
     position = position or 1,
-    limit = limit or #data
+    limit    = limit or #data
   }, Reader)
 end
 
@@ -62,7 +62,7 @@ end
 
 function Reader:u8()
   self:check(1)
-  local value = byte(self.data, self.position)
+  local value   = byte(self.data, self.position)
   self.position = self.position + 1
   return value
 end
@@ -98,7 +98,7 @@ end
 function Reader:u64()
   local value
   self:check(8)
-  value = ffi.cast('uint64_t *', self.pointer + self.position - 1)[0]
+  value         = ffi.cast('uint64_t *', self.pointer + self.position - 1)[0]
   self.position = self.position + 8
   if value < 0x20000000000000ULL then
     return tonumber(value)
@@ -109,7 +109,7 @@ end
 function Reader:i64()
   local value
   self:check(8)
-  value = ffi.cast('int64_t *', self.pointer + self.position - 1)[0]
+  value         = ffi.cast('int64_t *', self.pointer + self.position - 1)[0]
   self.position = self.position + 8
   if value < 0x20000000000000LL and value > -0x20000000000000LL then
     return tonumber(value)
@@ -145,7 +145,7 @@ end
 function Reader:float()
   local value
   self:check(4)
-  value = ffi.cast('const float *', self.pointer + self.position - 1)[0]
+  value         = ffi.cast('const float *', self.pointer + self.position - 1)[0]
   self.position = self.position + 4
   return tonumber(value)
 end
@@ -153,14 +153,14 @@ end
 function Reader:double()
   local value
   self:check(8)
-  value = ffi.cast('const double *', self.pointer + self.position - 1)[0]
+  value         = ffi.cast('const double *', self.pointer + self.position - 1)[0]
   self.position = self.position + 8
   return tonumber(value)
 end
 
 function Reader:bytes(n)
   self:check(n)
-  local value = sub(self.data, self.position, self.position + n - 1)
+  local value   = sub(self.data, self.position, self.position + n - 1)
   self.position = self.position + n
   return value
 end
@@ -170,17 +170,17 @@ function Reader:cstring()
   local stop = string.find(self.data, '\0', self.position, true)
   local value
   if stop == nil or stop > self.limit then
-    value = sub(self.data, self.position, self.limit)
+    value         = sub(self.data, self.position, self.limit)
     self.position = self.limit + 1
     return value
   end
-  value = sub(self.data, self.position, stop - 1)
+  value         = sub(self.data, self.position, stop - 1)
   self.position = stop + 1
   return value
 end
 
 function Reader:rest()
-  local value = sub(self.data, self.position, self.limit)
+  local value   = sub(self.data, self.position, self.limit)
   self.position = self.limit + 1
   return value
 end
@@ -287,7 +287,7 @@ end
 
 -- Connection -----------------------------------------------------------------
 
-local Connection = {}
+local Connection   = {}
 Connection.__index = Connection
 
 local function server_error(packet)
@@ -304,10 +304,10 @@ end
 function Connection:read_packet(timeout)
   local parts, header, length, payload
   repeat
-    header = self.stream:read(4, timeout)
-    length = byte(header, 1) + byte(header, 2) * 0x100 + byte(header, 3) * 0x10000
+    header        = self.stream:read(4, timeout)
+    length        = byte(header, 1) + byte(header, 2) * 0x100 + byte(header, 3) * 0x10000
     self.sequence = (byte(header, 4) + 1) % 0x100
-    payload = length > 0 and self.stream:read(length, timeout) or ''
+    payload       = length > 0 and self.stream:read(length, timeout) or ''
     if length == 0xffffff or parts ~= nil then
       parts = parts or {}
       table.insert(parts, payload)
@@ -325,7 +325,7 @@ function Connection:write_packet(payload)
     local size = math.min(length - offset + 1, 0xffffff)
     self.stream:write(sub(u32(size), 1, 3) .. char(self.sequence) .. sub(payload, offset, offset + size - 1))
     self.sequence = (self.sequence + 1) % 0x100
-    offset = offset + size
+    offset        = offset + size
   until size < 0xffffff
 end
 
@@ -415,7 +415,7 @@ function Connection:handshake(user, database)
   if data:left() > 0 then
     data:skip(3) -- character set and status
     capabilities = capabilities + data:u16() * 0x10000
-    length = data:u8()
+    length       = data:u8()
     data:skip(10)
     if band(capabilities, CLIENT_SECURE_CONNECTION) ~= 0 then
       scramble = scramble .. data:bytes(math.max(13, length - 8))
@@ -465,7 +465,7 @@ function Connection:handshake(user, database)
   }))
 
   while true do
-    packet = self:read_packet()
+    packet      = self:read_packet()
     local first = byte(packet, 1)
     if first == 0x00 then
       self.password = nil
@@ -497,15 +497,15 @@ local function column_definition(packet)
   local column = {}
   data:lenstr() -- catalog
   column.schema = data:lenstr()
-  column.table = data:lenstr()
+  column.table  = data:lenstr()
   data:lenstr() -- original table
   column.name = data:lenstr()
   data:lenstr() -- original name
   data:lenenc() -- length of fixed fields
-  column.charset = data:u16()
-  column.length = data:u32()
-  column.type = data:u8()
-  column.flags = data:u16()
+  column.charset  = data:u16()
+  column.length   = data:u32()
+  column.type     = data:u8()
+  column.flags    = data:u16()
   column.decimals = data:u8()
   return column
 end
@@ -523,7 +523,7 @@ function Connection:query(sql, each)
 
   self:command(char(COM_QUERY) .. sql)
   packet = self:read_packet()
-  first = byte(packet, 1)
+  first  = byte(packet, 1)
 
   if first == 0x00 then
     return nil, reader(packet, 2):lenenc()
@@ -535,7 +535,7 @@ function Connection:query(sql, each)
     fatal('LOCAL INFILE requested by the server')
   end
 
-  count = reader(packet):lenenc()
+  count   = reader(packet):lenenc()
   columns = {}
   for index = 1, count do
     columns[index] = column_definition(self:read_packet())
@@ -559,7 +559,7 @@ function Connection:query(sql, each)
       error(server_error(packet), 0)
     end
     data = reader(packet)
-    row = {}
+    row  = {}
     for index = 1, count do
       row[index] = data:lenstr()
     end
@@ -613,17 +613,17 @@ local function connect(options)
 end
 
 return {
-  NULL = NULL,
-  CLIENT_SSL = CLIENT_SSL,
-  connect = connect,
-  reader = reader,
-  failure = failure,
-  fatal = fatal,
+  NULL         = NULL,
+  CLIENT_SSL   = CLIENT_SSL,
+  connect      = connect,
+  reader       = reader,
+  failure      = failure,
+  fatal        = fatal,
   server_error = server_error,
-  literal = literal,
-  identifier = identifier,
-  u16 = u16,
-  u32 = u32,
-  u64 = u64,
-  lenenc = lenenc
+  literal      = literal,
+  identifier   = identifier,
+  u16          = u16,
+  u32          = u32,
+  u64          = u64,
+  lenenc       = lenenc
 }
