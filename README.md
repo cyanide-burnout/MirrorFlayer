@@ -104,6 +104,8 @@ Configuration is Lua only.
 | `timeout`   | `30`           | Connect and query timeout, seconds |
 | `batch`     | `100`          | Statements per transaction during a full load; the fiber yields after each |
 | `retry`     | `5`            | Seconds between connection attempts |
+| `thread`    | —              | Name of a group of application threads (Tarantool 3.9 or later, `box.cfg{ app_threads = N }` makes the group `app`): the source side runs in a thread of it, TX only applies; see *Threads* |
+| `thread_id` | `1`            | Which thread of that group |
 
 ### Mapping
 
@@ -142,6 +144,26 @@ with no tuples before a full reload, followed by `'insert'` for every row of
 the snapshot. It is called **inside the box transaction**: it must not yield
 (no network, no `fiber.sleep`, no waiting on channels), or the transaction
 is aborted.
+
+### Threads
+
+With `thread`, the source side of a replicator runs in an application thread:
+the socket, TLS, the protocol, the binlog or pgoutput and the conversion of
+values. The spaces stay in TX, which only applies the rows of a full load
+and the transactions of the stream, with their positions, as in TX alone:
+same triggers, same pace, same `stat()`. A full load and a busy stream then
+take no CPU of TX beyond the writes.
+
+```lua
+box.cfg({ app_threads = 1 })
+local replica = MirrorFlayer.new({ hosts = { 'db1:3306' }, user = 'replica', password = '...',
+  server = 1001, thread = 'app' })
+```
+
+`threads.eval()` runs code in every thread of a group, so each thread starts
+the replicator only when it is the one asked for (`thread_id`); one thread
+can run several replicators of different names. The thread calls the
+replicator in TX through one exported function, `mirrorflayer.call`.
 
 ## Values
 
@@ -248,7 +270,7 @@ and `caching_sha2_password` only while the server has the password cached
 With LuaRocks of Tarantool (`tt rocks`), the same headers are needed:
 
 ```
-tt rocks install https://raw.githubusercontent.com/cyanide-burnout/MirrorFlayer/2.1.0/mirrorflayer-2.1.0-1.rockspec
+tt rocks install https://raw.githubusercontent.com/cyanide-burnout/MirrorFlayer/2.2.0/mirrorflayer-2.2.0-1.rockspec
 tt rocks install https://raw.githubusercontent.com/cyanide-burnout/MirrorFlayer/main/mirrorflayer-scm-1.rockspec   # main
 tt rocks make mirrorflayer-scm-1.rockspec   # from a checkout
 ```
@@ -265,6 +287,8 @@ connection of the replicator (`ca` verifies against the CA of the server).
 MySQL users authenticate with `caching_sha2_password`, so a run without TLS
 goes through RSA first and the server cache later; PostgreSQL users with
 `SCRAM-SHA-256`.
+`THREAD=1` runs every replicator of the test in an application thread; it
+needs Tarantool 3.9 or later, `TARANTOOL_IMAGE=tarantool/tarantool:3.9.0`.
 
 1. `load` — tables with data exist before the start: full load, values of all
    types, then INSERT/UPDATE/DELETE over the stream, a key change, a

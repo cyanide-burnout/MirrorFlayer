@@ -1,8 +1,10 @@
 -- MirrorFlayer: replication of source tables into Tarantool spaces, in a
 -- fiber of Tarantool itself. The source is a driver: MirrorFlayer.MySQL
 -- (MySQL and MariaDB over the binlog) or MirrorFlayer.PostgreSQL (logical
--- replication with pgoutput). The engine keeps the fiber, hosts,
--- retries, transactions, positions, statistics and metrics.
+-- replication with pgoutput). MirrorFlayer.Runner keeps the loop with the
+-- source: hosts, retries, sessions, loads and the stream, in a fiber of TX or
+-- of an application thread (config.thread); the replicator here applies to
+-- the spaces: targets, transactions, positions, statistics and metrics.
 --
 --   local MirrorFlayer = require('MirrorFlayer')
 --   local replica = MirrorFlayer.new({
@@ -16,13 +18,10 @@ local fiber = require('fiber')
 local clock = require('clock')
 local log   = require('log')
 
-local store = require('MirrorFlayer.Store')
+local store  = require('MirrorFlayer.Store')
+local Runner = require('MirrorFlayer.Runner')
 
--- Source drivers by config.type
-local DRIVERS = {
-  mysql = 'MirrorFlayer.MySQL',
-  postgresql = 'MirrorFlayer.PostgreSQL'
-}
+local DRIVERS = Runner.DRIVERS
 
 local DEFAULTS = {
   type = 'mysql',
@@ -36,22 +35,12 @@ local DEFAULTS = {
   check = 30,
   timeout = 30,
   batch = 100,
-  retry = 5
+  retry = 5,
+  thread_id = 1
 }
 
 local Replica = {}
 Replica.__index = Replica
-
-local function address(text, default)
-  local host, port = string.match(text, '^%[(.+)%]:(%d+)$')
-  if host == nil then
-    host, port = string.match(text, '^([^:]+):(%d+)$')
-  end
-  if host == nil then
-    host = text
-  end
-  return host, tonumber(port) or default
-end
 
 local function check(condition, format, ...)
   if not condition then
@@ -66,11 +55,13 @@ end
 -- or { verify = 'none' | 'ca' | 'identity', ca, cert, key }), public_key (PEM
 -- of the source for caching_sha2_password without TLS, asked from the server
 -- when missing), position (space name), key (of the position, the server id
--- of MySQL or the slot of PostgreSQL by default), name (in logs and metrics), datetime ('datetime' or
--- 'number'), json ('map' or 'string'), uuid ('uuid', 'binary' or 'string'),
--- heartbeat (seconds), check (seconds between checks that a node of Galera
--- is ready), timeout (seconds), batch (rows per transaction), retry (seconds
--- between connection attempts)
+-- of MySQL or the slot of PostgreSQL by default), name (in logs and metrics),
+-- datetime ('datetime' or 'number'), json ('map' or 'string'), uuid ('uuid',
+-- 'binary' or 'string'), heartbeat (seconds), check (seconds between checks
+-- that a node of Galera is ready), timeout (seconds), batch (rows per
+-- transaction), retry (seconds between connection attempts), thread (a group
+-- of application threads to run the source side in) and thread_id (which
+-- thread of it, 1 by default)
 local function new(config)
   check(type(config) == 'table', 'config must be a table')
   local options = {}
@@ -89,6 +80,10 @@ local function new(config)
   check(type(options.check) == 'number' and options.check > 0, 'config.check must be a positive number of seconds')
   check(options.uuid == 'uuid' or options.uuid == 'binary' or options.uuid == 'string',
     "config.uuid must be 'uuid', 'binary' or 'string'")
+  check(options.thread == nil or (type(options.thread) == 'string' and options.thread ~= ''),
+    'config.thread must be the name of a group of application threads')
+  check(type(options.thread_id) == 'number' and options.thread_id >= 1 and options.thread_id == math.floor(options.thread_id),
+    'config.thread_id must be a positive integer')
   if options.tls == true then
     options.tls = { verify = 'none' }
   elseif type(options.tls) == 'table' then
@@ -115,6 +110,7 @@ local function new(config)
     driver = driver,
     sources = {},
     order = {},
+    loaders = {},
     status = 'created',
     stats = { transactions = 0, rows = 0, loads = 0, fills = 0, split = 0 }
   }, Replica)
@@ -125,7 +121,7 @@ end
 -- 'reset' before a full reload). columns are source column names in tuple
 -- order; by default the field names of the space format.
 function Replica:map(database, table_name, target, columns)
-  check(self.fiber == nil, 'map() must be called before start()')
+  check(not self.running, 'map() must be called before start()')
   check(type(database) == 'string' and type(table_name) == 'string', 'database and table must be strings')
   check(type(target) == 'string' or type(target) == 'function', 'target must be a space name or function')
   check(columns == nil or type(columns) == 'table', 'columns must be an array of names')
@@ -144,77 +140,50 @@ function Replica:say(level, format, ...)
   log[level]('MirrorFlayer[%s]: ' .. format, self.config.name, ...)
 end
 
--- Sources ----------------------------------------------------------------------
+-- Sink of the Runner: the spaces ------------------------------------------------------
 
--- Reads the columns of the source table and binds the targets to them
-function Replica:describe(connection, source)
-  local columns = connection:describe(source)
+-- Resolves the target spaces and opens the position space. The Runner asks
+-- for it with every session, so start() may be called before other code has
+-- made the spaces; a missing space is retried with the connection.
+function Replica:bind()
+  if self.bound then
+    return
+  end
+  for _, source in ipairs(self.order) do
+    source.targets = {}
+    for _, spec in ipairs(source.specs) do
+      table.insert(source.targets, store.target(spec.target, spec.columns))
+    end
+  end
+  self.positions = store.position(self.config.position, self.config.key, self.config.name)
+  self.bound     = true
+end
+
+-- Binds the targets of a table to its columns
+function Replica:columns(id, columns)
+  local source = self.sources[id]
   for _, target in ipairs(source.targets) do
     target:bind(columns)
   end
   source.columns = columns
-  source.stale = false
 end
 
--- Describes a table again over a connection of its own while the stream
--- holds the current one (the driver asks for it after DDL)
-function Replica:refresh(source)
-  local connection = self.driver.connect(self.config, self.host, self.port)
-  local status, problem = pcall(self.describe, self, connection, source)
-  connection:close()
-  if not status then
-    error(problem, 0)
-  end
+function Replica:position()
+  return self.positions:get()
 end
 
--- Full load ------------------------------------------------------------------
-
--- Loads one table over its targets; with flush its spaces are emptied first
-function Replica:fill(connection, source, flush)
-  if flush then
-    for _, target in ipairs(source.targets) do
-      if target.space ~= nil then
-        target.space:truncate()
-      end
-    end
-  end
-  local loader = store.load(source.targets, self.config.batch)
-  local aborts = store.aborts()
-  local count  = 0
-  connection:load(source, function (row)
-    loader:add(row)
-    count = count + 1
-  end)
-  local deleted = loader:finish()
-  self:say('info', '%s: %d rows loaded, %d written, %d stale rows deleted, %d aborted by triggers', source.id,
-    count, loader.written, deleted, store.aborts() - aborts)
+function Replica:flags()
+  return self.reload_needed == true, self.flush_needed == true
 end
 
--- Takes the position of the source first, then loads every table; changes
--- made meanwhile come again from the stream and applying them is idempotent
-function Replica:load(connection)
-  local state   = connection:position()
-  local started = clock.time()
-  self.status = 'loading'
-  self:say('info', 'full load at %s%s', state ~= '' and state or '(start)', self.flush_needed and ', spaces emptied' or '')
-  for _, source in ipairs(self.order) do
-    self:fill(connection, source, self.flush_needed)
-  end
-  store.transaction(function ()
-    self.position:put(state, clock.time())
-  end)
-  self.stats.loads = self.stats.loads + 1
-  self.stats.position = state
-  self.reload_needed = false
-  self.flush_needed  = false
-  self:say('info', 'full load done in %.1f s', clock.time() - started)
-  return state
+function Replica:request_reload()
+  self.reload_needed = true
 end
 
 -- True when the table has spaces among its targets and all of them are empty
-local function empty(source)
+function Replica:empty(id)
   local spaces = 0
-  for _, target in ipairs(source.targets) do
+  for _, target in ipairs(self.sources[id].targets) do
     if target.space ~= nil then
       if target.space:len() > 0 then
         return false
@@ -225,18 +194,73 @@ local function empty(source)
   return spaces > 0
 end
 
--- Loads alone the tables whose spaces are all empty though the position is
--- there (a space made anew or emptied by hand). The stream then comes from
--- the older position over the newer rows and converges, applying is
--- idempotent; the table may be empty at the source too, then it costs a query
-function Replica:refill(connection)
-  for _, source in ipairs(self.order) do
-    if empty(source) then
-      self.status = 'loading'
-      self:say('info', '%s: its spaces are empty, loading the table', source.id)
-      self:fill(connection, source)
-      self.stats.fills = self.stats.fills + 1
+-- A table is loaded over its targets; with flush its spaces are emptied first
+-- (truncate, no on_replace triggers)
+function Replica:load_begin(id, flush)
+  local source = self.sources[id]
+  if flush then
+    for _, target in ipairs(source.targets) do
+      if target.space ~= nil then
+        target.space:truncate()
+      end
     end
+  end
+  self.loaders[id] = { loader = store.load(source.targets, self.config.batch), aborts = store.aborts() }
+end
+
+function Replica:load_rows(id, rows)
+  local loader = self.loaders[id].loader
+  for _, row in ipairs(rows) do
+    loader:add(row)
+  end
+end
+
+-- Returns rows written, stale rows deleted, transactions aborted by triggers
+function Replica:load_finish(id)
+  local item = self.loaders[id]
+  self.loaders[id] = nil
+  local deleted = item.loader:finish()
+  return item.loader.written, deleted, store.aborts() - item.aborts
+end
+
+function Replica:loaded(state)
+  store.transaction(function ()
+    self.positions:put(state, clock.time())
+  end)
+  self.stats.loads    = self.stats.loads + 1
+  self.stats.position = state
+  self.reload_needed  = false
+  self.flush_needed   = false
+end
+
+function Replica:filled()
+  self.stats.fills = self.stats.fills + 1
+end
+
+function Replica:resume(state)
+  self.stats.position = state
+  self.dirty = false
+end
+
+-- status, error (an empty string clears it), host, port, tls
+function Replica:report(fields)
+  if fields.status ~= nil then
+    self.status = fields.status
+  end
+  if fields.error ~= nil then
+    self.stats.error = fields.error ~= '' and fields.error or nil
+  end
+  if fields.host ~= nil then
+    self.host, self.port = fields.host, fields.port
+  end
+  if fields.tls ~= nil then
+    self.stats.tls = fields.tls
+  end
+end
+
+function Replica:cleanup()
+  if box.is_in_txn() then
+    box.rollback()
   end
 end
 
@@ -247,7 +271,7 @@ function Replica:flush()
     return
   end
   store.transaction(function ()
-    self.position:put(self.stats.position, self.stats.event_time or 0)
+    self.positions:put(self.stats.position, self.stats.event_time or 0)
   end)
   self.dirty = false
   self.stored = clock.time()
@@ -257,7 +281,6 @@ end
 function Replica:started()
   self.status = 'streaming'
   self.stats.error = nil
-  self:say('info', 'streaming from %s', self.stats.position ~= '' and self.stats.position or '(start)')
 end
 
 -- The source moved on without changes for the mapped tables (a keepalive of
@@ -279,7 +302,8 @@ end
 -- Applies a finished source transaction with its position in one box
 -- transaction; when a trigger of a target yields, statement by statement and
 -- the position last (counted in split). Transactions without changes only
--- move the position, which is written at most once a second
+-- move the position, which is written at most once a second. A change is
+-- { table id, operation, old, new }
 function Replica:commit(changes, state, event_time)
   local stats = self.stats
   stats.position = state
@@ -293,14 +317,14 @@ function Replica:commit(changes, state, event_time)
   end
   local statements = {}
   for _, change in ipairs(changes) do
-    for _, target in ipairs(change[1].targets) do
+    for _, target in ipairs(self.sources[change[1]].targets) do
       table.insert(statements, { target, change[2], change[3], change[4] })
     end
   end
   local atomic = store.apply(statements, function (item)
     item[1]:apply(item[2], item[3], item[4])
   end, function ()
-    self.position:put(state, event_time)
+    self.positions:put(state, event_time)
   end)
   if not atomic then
     stats.split = stats.split + 1
@@ -311,94 +335,6 @@ function Replica:commit(changes, state, event_time)
   stats.lag = math.max(0, self.stored - event_time)
   stats.transactions = stats.transactions + 1
   stats.rows = stats.rows + #changes
-end
-
--- Resolves the target spaces and opens the position space. It runs in the
--- fiber, so start() may be called before other code has made the spaces;
--- a missing space is retried with the connection.
-function Replica:bind()
-  for _, source in ipairs(self.order) do
-    source.targets = {}
-    for _, spec in ipairs(source.specs) do
-      table.insert(source.targets, store.target(spec.target, spec.columns))
-    end
-  end
-  self.position = store.position(self.config.position, self.config.key, self.config.name)
-  self.bound    = true
-end
-
-function Replica:session(host, port)
-  if not self.bound then
-    self:bind()
-  end
-  local connection = self.driver.connect(self.config, host, port)
-  self.connection = connection
-  self.host, self.port = host, port
-  self.stats.tls = connection.secure
-  self:say('info', 'connected to %s:%d, %s%s', host, port, connection.version, connection.secure and ', TLS' or '')
-
-  for _, source in ipairs(self.order) do
-    self:describe(connection, source)
-  end
-
-  local state = self.position:get()
-  if state == nil or self.reload_needed then
-    state = self:load(connection)
-  else
-    self:refill(connection)
-  end
-  self.stats.position = state
-  self.dirty = false
-
-  connection:stream(state, self.sources, self)
-end
-
--- Keeps failure objects, adds the stack to unexpected errors
-local function trace(problem)
-  if type(problem) == 'table' then
-    return problem
-  end
-  return debug.traceback(tostring(problem), 2)
-end
-
-local function loop(self)
-  local hosts = self.config.hosts
-  local index = 1
-  while not self.stopping do
-    local host, port = address(hosts[index], self.driver.PORT)
-    local status, problem = xpcall(self.session, trace, self, host, port)
-    if self.connection ~= nil then
-      self.connection:close()
-      self.connection = nil
-    end
-    if box.is_in_txn() then
-      box.rollback()
-    end
-    -- stop() or a cancel from outside, e.g. Tarantool shutting down
-    if self.stopping or not pcall(fiber.testcancel) then
-      break
-    end
-    self.stats.error = tostring(problem)
-    if type(problem) == 'table' and problem.fatal then
-      self.status = 'failed'
-      self:say('error', 'stopped: %s', tostring(problem))
-      break
-    end
-    if type(problem) == 'table' and problem.reload then
-      self.reload_needed = true
-      self:say('warn', '%s:%d: full reload: %s', host, port, tostring(problem))
-    else
-      self:say('error', '%s:%d: %s', host, port, tostring(problem))
-    end
-    index = index % #hosts + 1
-    self.status = 'waiting'
-    if not pcall(fiber.sleep, self.config.retry) then
-      break
-    end
-  end
-  if self.status ~= 'failed' then
-    self.status = 'stopped'
-  end
 end
 
 -- Metrics ----------------------------------------------------------------------
@@ -435,7 +371,7 @@ end
 -- Control ----------------------------------------------------------------------
 
 function Replica:start()
-  check(self.fiber == nil, 'already started')
+  check(not self.running, 'already started')
   check(type(box.cfg) ~= 'function', 'call box.cfg{} before start()')
   check(#self.order > 0, 'nothing is mapped')
   local config = self.config
@@ -444,27 +380,45 @@ function Replica:start()
   check(config.password == nil or type(config.password) == 'string', 'config.password must be a string')
   local problem = self.driver.check(config)
   check(problem == nil, '%s', problem)
-  self.bound    = false
-  self.stopping = false
-  self.status = 'starting'
-  store.configure(self.config.batch)
+  local thread
+  if config.thread ~= nil then
+    thread = require('MirrorFlayer.Thread')
+    problem = thread.check(config.thread, config.thread_id)
+    check(problem == nil, '%s', problem)
+  end
+  local specs = {}
+  for index, source in ipairs(self.order) do
+    specs[index] = { id = source.id, database = source.database, table = source.table }
+  end
+  self.bound   = false
+  self.loaders = {}
+  self.status  = 'starting'
+  store.configure(config.batch)
   self:register()
-  self.fiber = fiber.new(loop, self)
-  self.fiber:name('MirrorFlayer:' .. self.config.name, { truncate = true })
-  self.fiber:set_joinable(true)
+  if thread ~= nil then
+    thread.launch(self, specs)
+    self.thread = thread
+  else
+    self.runner = Runner.new(config, specs, self)
+    self.fiber  = self.runner:start()
+  end
+  self.running = true
   return self
 end
 
 function Replica:stop()
-  if self.fiber == nil then
+  if not self.running then
     return
   end
-  self.stopping = true
-  if self.fiber:status() ~= 'dead' then
-    self.fiber:cancel()
+  if self.thread ~= nil then
+    self.thread.halt(self)
+    self.thread = nil
+  else
+    self.runner:stop()
+    self.fiber = nil
   end
-  pcall(self.fiber.join, self.fiber)
-  self.fiber = nil
+  self.running = false
+  self:cleanup()
   self:unregister()
   self.status = 'stopped'
 end
@@ -474,7 +428,7 @@ end
 -- deleted afterwards. With flush the spaces of each table are emptied
 -- (truncate, no on_replace triggers) right before it is loaded
 function Replica:reload(flush)
-  check(self.fiber ~= nil, 'not started')
+  check(self.running, 'not started')
   self.reload_needed = true
   self.flush_needed  = flush == true
   self:stop()
@@ -510,5 +464,5 @@ end
 
 return {
   new = new,
-  _VERSION = '2.1.0'
+  _VERSION = '2.2.0'
 }

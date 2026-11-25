@@ -6,6 +6,8 @@
 #   SERVER=mariadb|galera|mysql|postgresql
 #                          source (images mariadb:11.4, the same as a node of
 #                          Galera, mysql:8.4, postgres:17; SERVER_IMAGE overrides)
+#   THREAD=1               the replicators run their source side in an application
+#                          thread (needs TARANTOOL_IMAGE of Tarantool 3.9 or later)
 #   TLS=off|on|ca          replicator connection: plain, TLS without verification,
 #                          TLS verified against the CA of the server
 #
@@ -21,6 +23,7 @@ SOURCE=$(pwd)
 WORK=${WORK:-$SOURCE/.work}
 SERVER=${SERVER:-mariadb}
 TLS=${TLS:-off}
+THREAD=${THREAD:-0}
 TARANTOOL_IMAGE=${TARANTOOL_IMAGE:-tarantool/tarantool:3}
 NETWORK=mirrorflayer-net
 DATABASE=mirrorflayer-server
@@ -122,10 +125,10 @@ else
 fi
 
 phase() {
-  echo "=== phase $1 ($SERVER, TLS $TLS)"
+  echo "=== phase $1 ($SERVER, TLS $TLS, thread $THREAD)"
   docker run --rm --name "$TARANTOOL" --network "$NETWORK" \
     --user "$(id -u):$(id -g)" -e HOME=/tmp -e MIRRORFLAYER_DATA=/data \
-    -e SERVER="$SERVER" -e TLS="$TLS" -e SERVER_HOST="$DATABASE" \
+    -e SERVER="$SERVER" -e TLS="$TLS" -e THREAD="$THREAD" -e SERVER_HOST="$DATABASE" \
     -v "$SOURCE:/src:ro" -v "$WORK/$2:/data" -v "$WORK/certs:/certs:ro" -w /src \
     -v "$SOURCE/Source:/usr/share/tarantool/MirrorFlayer:ro" \
     -v "$SOURCE/Source:/usr/lib/x86_64-linux-gnu/tarantool/MirrorFlayer:ro" \
@@ -138,4 +141,4 @@ phase load data
 phase resume data
 phase purge data
 phase late late
-echo "all phases passed ($SERVER_IMAGE, TLS $TLS)"
+echo "all phases passed ($SERVER_IMAGE, TLS $TLS, thread $THREAD)"

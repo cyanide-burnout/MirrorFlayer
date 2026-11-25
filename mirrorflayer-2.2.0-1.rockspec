@@ -1,9 +1,9 @@
 package = 'mirrorflayer'
-version = '2.1.0-1'
+version = '2.2.0-1'
 
 source = {
   url    = 'git+https://github.com/cyanide-burnout/MirrorFlayer.git',
-  tag    = '2.1.0'
+  tag    = '2.2.0'
 }
 
 description = {
@@ -36,7 +36,9 @@ build = {
     ['MirrorFlayer']                     = 'Source/init.lua',
     ['MirrorFlayer.Column']              = 'Source/Column.lua',
     ['MirrorFlayer.Failure']             = 'Source/Failure.lua',
+    ['MirrorFlayer.Runner']              = 'Source/Runner.lua',
     ['MirrorFlayer.Store']               = 'Source/Store.lua',
+    ['MirrorFlayer.Thread']              = 'Source/Thread.lua',
     ['MirrorFlayer.Transport']           = 'Source/Transport.lua',
     ['MirrorFlayer.MySQL']               = 'Source/MySQL/init.lua',
     ['MirrorFlayer.MySQL.BinLog']        = 'Source/MySQL/BinLog.lua',

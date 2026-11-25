@@ -27,7 +27,18 @@ local TLS   = os.getenv('TLS') or 'off'
 
 require('compat').binary_data_decoding = 'new'
 
-box.cfg({ work_dir = os.getenv('MIRRORFLAYER_DATA') or '/data', log_level = 5 })
+-- THREAD=1: the replicators run their source side in an application thread
+local THREAD = os.getenv('THREAD') == '1'
+
+box.cfg({ work_dir = os.getenv('MIRRORFLAYER_DATA') or '/data', log_level = 5, app_threads = THREAD and 1 or nil })
+
+-- The setting of the thread mode in a config
+local function threaded(config)
+  if THREAD then
+    config.thread = 'app'
+  end
+  return config
+end
 
 -- Helpers --------------------------------------------------------------------
 
@@ -299,7 +310,7 @@ local function settings(extra)
   for key, value in pairs(extra or {}) do
     config[key] = value
   end
-  return config
+  return threaded(config)
 end
 
 local function replicator(only_locations)
@@ -579,7 +590,12 @@ local function late()
   ok(box.space.GlobalLocations:get(600) ~= nil, 'the row inserted meanwhile is there')
   stored_position(replica, KEY, target)
   ok(box.space.ReplicatorPositions:get(KEY)[3] > 0, 'event time stored next to the position')
-  replica.fiber:cancel()
+  -- In TX its fiber may be cancelled from outside; in a thread stop() does it
+  if THREAD then
+    replica:stop()
+  else
+    replica.fiber:cancel()
+  end
   wait(function () return replica:stat().status == 'stopped' end, 'stop after a cancel')
   ok(replica:stat().error == nil, 'a cancel is not an error: %s', tostring(replica:stat().error))
   replica:stop()

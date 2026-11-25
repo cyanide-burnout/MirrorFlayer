@@ -30,7 +30,18 @@ local MARIADB = SERVER ~= 'mysql'
 
 require('compat').binary_data_decoding = 'new'
 
-box.cfg({ work_dir = os.getenv('MIRRORFLAYER_DATA') or '/data', log_level = 5 })
+-- THREAD=1: the replicators run their source side in an application thread
+local THREAD = os.getenv('THREAD') == '1'
+
+box.cfg({ work_dir = os.getenv('MIRRORFLAYER_DATA') or '/data', log_level = 5, app_threads = THREAD and 1 or nil })
+
+-- The setting of the thread mode in a config
+local function threaded(config)
+  if THREAD then
+    config.thread = 'app'
+  end
+  return config
+end
 
 -- Helpers --------------------------------------------------------------------
 
@@ -292,12 +303,12 @@ end)
 local KEY = 1001
 
 local function replicator(only_locations)
-  local replica = MirrorFlayer.new({
+  local replica = MirrorFlayer.new(threaded({
     hosts = { 'mirrorflayer-nowhere:3306', HOST .. ':3306' },
     user = 'replica', password = 'secret', server = KEY,
     heartbeat = 1, retry = 1, batch = 500, check = 1,
     tls = (TLS == 'on' and true) or (TLS == 'ca' and { ca = '/certs/ca.pem' }) or false
-  })
+  }))
   replica:map('Registry', 'Locations', 'GlobalLocations', { 'ID', 'Node', 'Kind', 'Link', 'Slot', 'Modified' })
   if not only_locations then
     replica:map('Registry', 'Locations', function (operation, old, new)
@@ -469,11 +480,11 @@ local function load()
     { key = KEY + 2, space = 'TypesBinary', datetime = 'datetime', json = 'map', uuid = 'binary' }
   }
   for _, item in ipairs(MODES) do
-    local other = MirrorFlayer.new({
+    local other = MirrorFlayer.new(threaded({
       hosts = { HOST .. ':3306' }, user = 'replica', password = 'secret', server = item.key,
       name = item.space, datetime = item.datetime, json = item.json, uuid = item.uuid, heartbeat = 1, retry = 1,
       tls = (TLS == 'on' and true) or (TLS == 'ca' and { ca = '/certs/ca.pem' }) or false
-    })
+    }))
     other:map('Registry', 'Types', item.space)
     item.replica = other:start()
     caught_up(other)
@@ -490,7 +501,9 @@ local function load()
 
   -- A node of Galera that leaves the cluster is left, and taken again when it is back
   if SERVER == 'galera' then
-    ok(replica.connection ~= nil and replica.connection.galera == true, 'the node is known as one of Galera')
+    if not THREAD then
+      ok(replica.runner.connection ~= nil and replica.runner.connection.galera == true, 'the node is known as one of Galera')
+    end
     exec("SET GLOBAL wsrep_cluster_address = ''")
     wait(function ()
       -- Our check, or the node itself refusing its clients (1047)
@@ -589,7 +602,12 @@ local function late()
   stored_position(replica, KEY, target)
   ok(box.space.ReplicatorPositions:get(KEY)[3] > 0, 'event time stored next to the position')
   -- Cancelled from outside, as on shutdown: no error, just stopped
-  replica.fiber:cancel()
+  -- In TX its fiber may be cancelled from outside; in a thread stop() does it
+  if THREAD then
+    replica:stop()
+  else
+    replica.fiber:cancel()
+  end
   wait(function () return replica:stat().status == 'stopped' end, 'stop after a cancel')
   ok(replica:stat().error == nil, 'a cancel is not an error: %s', tostring(replica:stat().error))
   replica:stop()

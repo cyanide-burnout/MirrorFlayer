@@ -76,7 +76,9 @@ installed as `MirrorFlayer/MySQL/`, its `init.lua` being the driver itself.
 
 | Module | Role |
 |--------|------|
-| `MirrorFlayer` (`Source/init.lua`) | the engine: API, replication fiber, reconnection, host rotation, transactions, positions, statistics, metrics |
+| `MirrorFlayer` (`Source/init.lua`) | the replicator in TX: API, targets, loads and transactions applied, positions, statistics, metrics |
+| `MirrorFlayer.Runner` | the loop with the source: hosts, retries, sessions, columns, full loads, the stream; it touches no space, a sink takes what concerns them |
+| `MirrorFlayer.Thread` | the Runner in an application thread, its sink a proxy to the replicator in TX through `threads.call` |
 | `MirrorFlayer.Failure` | failure objects: fatal stops the replicator, reload asks for a full load |
 | `MirrorFlayer.Column` | values in their Tarantool types, datetime and json modes |
 | `MirrorFlayer.Store` | targets, pacing of writes, full load, position |
