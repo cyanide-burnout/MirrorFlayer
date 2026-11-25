@@ -270,7 +270,7 @@ and `caching_sha2_password` only while the server has the password cached
 With LuaRocks of Tarantool (`tt rocks`), the same headers are needed:
 
 ```
-tt rocks install https://raw.githubusercontent.com/cyanide-burnout/MirrorFlayer/2.2.1/mirrorflayer-2.2.1-1.rockspec
+tt rocks install https://raw.githubusercontent.com/cyanide-burnout/MirrorFlayer/2.2.2/mirrorflayer-2.2.2-1.rockspec
 tt rocks install https://raw.githubusercontent.com/cyanide-burnout/MirrorFlayer/main/mirrorflayer-scm-1.rockspec   # main
 tt rocks make mirrorflayer-scm-1.rockspec   # from a checkout
 ```

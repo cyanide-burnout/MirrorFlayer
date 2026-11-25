@@ -482,5 +482,5 @@ end
 
 return {
   new      = new,
-  _VERSION = '2.2.1'
+  _VERSION = '2.2.2'
 }
