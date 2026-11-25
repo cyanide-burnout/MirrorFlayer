@@ -29,6 +29,7 @@ local DEFAULTS = {
   tls = false,
   datetime = 'datetime',
   json = 'map',
+  uuid = 'uuid',
   heartbeat = 10,
   timeout = 30,
   batch = 100,
@@ -62,9 +63,9 @@ end
 -- of the source for caching_sha2_password without TLS, asked from the server
 -- when missing), position (space name), key (of the position, the server id
 -- of MySQL by default), name (in logs and metrics), datetime ('datetime' or
--- 'number'), json ('map' or 'string'), heartbeat (seconds), timeout
--- (seconds), batch (rows per transaction), retry (seconds between connection
--- attempts)
+-- 'number'), json ('map' or 'string'), uuid ('uuid', 'binary' or 'string'),
+-- heartbeat (seconds), timeout (seconds), batch (rows per transaction), retry
+-- (seconds between connection attempts)
 local function new(config)
   check(type(config) == 'table', 'config must be a table')
   local options = {}
@@ -80,6 +81,8 @@ local function new(config)
   check(type(options.name) == 'string', 'config.name must be a string')
   check(options.datetime == 'datetime' or options.datetime == 'number', "config.datetime must be 'datetime' or 'number'")
   check(options.json == 'map' or options.json == 'string', "config.json must be 'map' or 'string'")
+  check(options.uuid == 'uuid' or options.uuid == 'binary' or options.uuid == 'string',
+    "config.uuid must be 'uuid', 'binary' or 'string'")
   if options.tls == true then
     options.tls = { verify = 'none' }
   elseif type(options.tls) == 'table' then

@@ -9,6 +9,7 @@
 //                                            cert = 'client.pem', key = 'client.key', timeout = 30 })
 //   session:read(n [, timeout])        -- exactly n bytes
 //   session:write(data [, timeout])
+//   session:wait(timeout)              -- true when data can be read, false when the time ran out
 //   session:close()
 //   TLS.encrypt(pem, data)             -- RSA-OAEP (SHA-1, as MySQL) with a PEM public key
 //
@@ -313,6 +314,33 @@ static int WriteSession(lua_State* state)
   return 0;
 }
 
+// session:wait(timeout): waits for data without reading it, so a stream can send something of its own while the
+// other side is silent; decrypted data already buffered counts
+
+static int WaitData(lua_State* state)
+{
+  struct Session* session;
+  double timeout;
+  int events;
+
+  session = CheckSession(state);
+  timeout = luaL_optnumber(state, 2, session->timeout);
+
+  if (SSL_pending(session->connection) > 0)
+  {
+    lua_pushboolean(state, 1);
+    return 1;
+  }
+
+  events = coio_wait(session->handle, COIO_READ, timeout);
+
+  if (fiber_is_cancelled())
+    luaL_error(state, "fiber is cancelled");
+
+  lua_pushboolean(state, events != 0);
+  return 1;
+}
+
 static int CloseSession(lua_State* state)
 {
   struct Session* session;
@@ -381,6 +409,7 @@ LUA_API int luaopen_MirrorFlayer_TLS(lua_State* state)
   {
     { "read",  ReadSession  },
     { "write", WriteSession },
+    { "wait",  WaitData     },
     { "close", CloseSession },
     { "__gc",  CloseSession },
     { NULL,    NULL         }

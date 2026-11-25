@@ -122,7 +122,16 @@ local function M(year, month, day, hour, minute, second, usec, date)
     second = second, usec = usec, date = date }
 end
 
-local function expect(value, mode, json)
+local function expect(value, mode, json, ids)
+  if uuid.is_uuid(value) then
+    if ids == 'string' then
+      return value:str()
+    end
+    if ids == 'binary' then
+      return varbinary.new(value:bin('b'))
+    end
+    return value
+  end
   if type(value) == 'table' and value.json then
     return json == 'string' and value.text or value.map
   end
@@ -254,7 +263,7 @@ local function setup_spaces()
   for _, item in ipairs(TYPES) do
     table.insert(format, { name = item[1], type = 'any', is_nullable = true })
   end
-  for _, name in ipairs({ 'Types', 'TypesNumber' }) do
+  for _, name in ipairs({ 'Types', 'TypesNumber', 'TypesBinary' }) do
     box.schema.space.create(name, { if_not_exists = true, format = format })
     box.space[name]:create_index('ID', { if_not_exists = true, parts = { 1, 'unsigned' } })
   end
@@ -346,7 +355,7 @@ local function locations_equal(what)
   ok(true, '%s: GlobalLocations equals Locations (%d rows)', what, #rows)
 end
 
-local function check_types(id, what, space, mode, json)
+local function check_types(id, what, space, mode, json, ids)
   space = space or 'Types'
   local tuple = box.space[space]:get(id)
   if tuple == nil then
@@ -355,7 +364,7 @@ local function check_types(id, what, space, mode, json)
   end
   local good = true
   for index, item in ipairs(TYPES) do
-    local expected = expect(item[4], mode, json)
+    local expected = expect(item[4], mode, json, ids)
     if not same(tuple[index + 1], expected) then
       good = false
       ok(false, '%s: %s %d.%s is %s (%s), expected %s', what, space, id, item[1],
@@ -449,26 +458,29 @@ local function load()
   ok(type(stat.lag) == 'number' and type(stat.event_time) == 'number' and stat.event_time > 0,
     'stat: lag %s, event time %s', tostring(stat.lag), tostring(stat.event_time))
 
-  -- The number and string modes, over the full load (rows 1-4) and the stream (row 5)
-  local others = {}
-  for key, mode in pairs({ [KEY + 1] = 'number' }) do
+  -- The other modes, over the full load (rows 1-4) and the stream (row 5)
+  local MODES = {
+    { key = KEY + 1, space = 'TypesNumber', datetime = 'number', json = 'string', uuid = 'string' },
+    { key = KEY + 2, space = 'TypesBinary', datetime = 'datetime', json = 'map', uuid = 'binary' }
+  }
+  for _, item in ipairs(MODES) do
     local other = MirrorFlayer.new({
-      hosts = { HOST .. ':3306' }, user = 'replica', password = 'secret', server = key,
-      name = 'Types' .. mode, datetime = mode, json = 'string', heartbeat = 1, retry = 1,
+      hosts = { HOST .. ':3306' }, user = 'replica', password = 'secret', server = item.key,
+      name = item.space, datetime = item.datetime, json = item.json, uuid = item.uuid, heartbeat = 1, retry = 1,
       tls = (TLS == 'on' and true) or (TLS == 'ca' and { ca = '/certs/ca.pem' }) or false
     })
-    other:map('Registry', 'Types', 'TypesNumber')
-    others[mode] = other:start()
+    other:map('Registry', 'Types', item.space)
+    item.replica = other:start()
     caught_up(other)
   end
   exec('INSERT INTO Registry.Types (ID, ' .. type_columns() .. ') SELECT 5, ' .. type_columns() .. ' FROM Registry.Types WHERE ID = 1')
   caught_up(replica)
   check_types(5, 'stream', 'Types', 'datetime')
-  for mode, other in pairs(others) do
-    caught_up(other)
-    check_types(1, 'load', 'TypesNumber', mode, 'string')
-    check_types(5, 'stream', 'TypesNumber', mode, 'string')
-    other:stop()
+  for _, item in ipairs(MODES) do
+    caught_up(item.replica)
+    check_types(1, 'load', item.space, item.datetime, item.json, item.uuid)
+    check_types(5, 'stream', item.space, item.datetime, item.json, item.uuid)
+    item.replica:stop()
   end
   replica:stop()
 end

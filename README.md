@@ -52,6 +52,7 @@ Configuration is Lua only.
 | `key`       | `server`       | Key of the position in that space: a stable number or string of this replicator, the replica server id by default |
 | `datetime`  | `'datetime'`   | Dates and times: `'datetime'` (`datetime` and `interval` of Tarantool) or `'number'` (seconds), see *Values* |
 | `json`      | `'map'`        | JSON: `'map'` (MsgPack maps and arrays) or `'string'` (the text the server prints), see *Values* |
+| `uuid`      | `'uuid'`       | UUID: `'uuid'` (`uuid` of Tarantool), `'binary'` (16 bytes in network byte order, `varbinary`) or `'string'` (canonical text, lowercase) |
 | `name`      | `'MirrorFlayer'` | Name in logs and the label of metrics |
 | `heartbeat` | `10`           | Seconds between heartbeats of an idle source; no data for three periods reconnects |
 | `timeout`   | `30`           | Connect and query timeout, seconds |
@@ -108,7 +109,7 @@ either way. Every value gets its Tarantool type.
 | `CHAR`, `VARCHAR`, `TEXT` | string |
 | `BINARY`, `VARBINARY`, `BLOB` | `varbinary` (MP_BIN) |
 | `JSON` | MsgPack map or array, JSON `null` as `box.NULL`; `'string'`: the text the server prints |
-| `UUID` (MariaDB) | `uuid` |
+| `UUID` (MariaDB) | `uuid`; `'binary'`: 16 bytes in network byte order; `'string'`: canonical text |
 | `ENUM` | member string |
 | `SET` | members joined by commas |
 | `BIT` | number |
@@ -166,8 +167,9 @@ RSA first and the server cache later.
 1. `load` — tables with data exist before the start: full load, values of all
    types, then INSERT/UPDATE/DELETE over the stream, a key change, a
    multi-table transaction, `on_replace` triggers, a trigger that yields and a
-   function target; a second replicator checks `datetime = 'number'` and
-   `json = 'string'` over the load and the stream.
+   function target; two more replicators check `datetime = 'number'`,
+   `json = 'string'`, `uuid = 'string'` and `uuid = 'binary'` over the load
+   and the stream.
 2. `resume` — changes made while Tarantool is down; restart continues from the
    stored GTID without a full load.
 3. `purge` — changes and a purge of the binlog while down: error 1236, full

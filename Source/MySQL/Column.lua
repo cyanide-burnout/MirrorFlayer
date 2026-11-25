@@ -464,13 +464,13 @@ end
 
 -- MariaDB keeps a UUID of version 1-5 and the RFC 4122 variant in its row
 -- with the five groups in reverse order, others as they are
-local function uuid_row(value)
+local function uuid_row(column, value)
   local swapped = sub(value, 13, 16) .. sub(value, 11, 12) .. sub(value, 9, 10) .. sub(value, 7, 8) .. sub(value, 1, 6)
   local version = math.floor(byte(swapped, 7) / 16)
   if version >= 1 and version <= 5 and band(byte(swapped, 9), 0xc0) == 0x80 then
     value = swapped
   end
-  return uuid.frombin(value, 'b')
+  return convert.identity(column, uuid.frombin(value, 'b'))
 end
 
 local function finish(column, value)
@@ -478,7 +478,7 @@ local function finish(column, value)
     return binary(value)
   end
   if column.kind == 'uuid' then
-    return uuid_row(value)
+    return uuid_row(column, value)
   end
   if column.kind == 'json' then
     return convert.document(column, value)

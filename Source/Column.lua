@@ -1,7 +1,7 @@
 -- Values in their Tarantool types, the same for every source driver.
 --
 -- Integers are numbers (uint64_t/int64_t cdata above 2^53), zero dates and
--- NULL are box.NULL, binary strings are varbinary (MP_BIN), UUID is uuid.
+-- NULL are box.NULL, binary strings are varbinary (MP_BIN).
 -- Date and time follow the datetime mode of the replicator, all in UTC:
 --   'datetime'  datetime of Tarantool with fractions, time of day and
 --               durations as interval (the default)
@@ -10,6 +10,10 @@
 -- JSON follows the json mode:
 --   'map'       MsgPack maps and arrays, JSON null as box.NULL (the default)
 --   'string'    the text as the server prints it
+-- UUID follows the uuid mode:
+--   'uuid'      uuid of Tarantool (the default)
+--   'binary'    16 bytes in network byte order as varbinary
+--   'string'    the canonical text, lowercase
 
 local ffi      = require('ffi')
 local uuid     = require('uuid')
@@ -115,12 +119,28 @@ local function document(column, text)
   return json.decode(text)
 end
 
+-- A UUID as the uuid mode of the column wants it, from a uuid object
+local function identity(column, value)
+  if column.uuid == 'string' then
+    return value:str()
+  end
+  if column.uuid == 'binary' then
+    return binary(value:bin('b'))
+  end
+  return value
+end
+
+-- A UUID from its text
 local function identifier(column, text)
-  return uuid.fromstr(text)
+  local value = uuid.fromstr(text)
+  if value == nil then
+    error(errors.failure('bad UUID ' .. text), 0)
+  end
+  return identity(column, value)
 end
 
 -- A column of a source table: name, type (as the source names it), kind (of
--- the conversion), supported, and the datetime and json modes from config
+-- the conversion), supported, and the datetime, json and uuid modes from config
 local function new(name, data_type, kind, config)
   return {
     name      = name,
@@ -128,7 +148,8 @@ local function new(name, data_type, kind, config)
     kind      = kind or 'bytes',
     supported = kind ~= nil,
     datetime  = config and config.datetime or 'datetime',
-    json      = config and config.json or 'map'
+    json      = config and config.json or 'map',
+    uuid      = config and config.uuid or 'uuid'
   }
 end
 
@@ -143,6 +164,7 @@ return {
   clock = clock,
   temporal = temporal,
   document = document,
+  identity = identity,
   identifier = identifier,
   new = new
 }
