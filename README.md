@@ -27,6 +27,24 @@ Requires Tarantool 3.x and
 * or PostgreSQL 12 or later with `wal_level=logical`, free replication slots
   and WAL senders, and a publication of the mapped tables.
 
+## 2.0
+
+2.0 breaks with the first release in what applications read:
+
+* Values have their Tarantool types. `DATETIME`, `TIMESTAMP` and `DATE` are
+  `datetime` in UTC (`datetime = 'number'` gives seconds since the epoch),
+  `TIME` is `interval`, JSON is MsgPack maps and arrays (`json = 'string'`
+  keeps the text), UUID is `uuid` (`uuid = 'binary' | 'string'`). Code that
+  parsed dates from strings reads them directly: `value.timestamp` instead of
+  `datetime.parse(value, ...)`, and a space format may type the field as
+  `datetime`.
+* Sources are drivers: `type = 'mysql'` (the default) or `'postgresql'`. The
+  MySQL modules moved to `MirrorFlayer.MySQL.*` in the `MySQL/` subdirectory;
+  remove an installed `MirrorFlayer/MySQL.lua` of the first release, it would
+  win `require('MirrorFlayer.MySQL')`.
+* The position of `replicatord` is not read any more: a replicator without a
+  position of its own starts with a full load, written over the spaces.
+
 ## Usage
 
 ```lua
@@ -216,7 +234,8 @@ and `caching_sha2_password` only while the server has the password cached
 With LuaRocks of Tarantool (`tt rocks`), the same headers are needed:
 
 ```
-tt rocks install https://raw.githubusercontent.com/cyanide-burnout/MirrorFlayer/main/mirrorflayer-scm-1.rockspec
+tt rocks install https://raw.githubusercontent.com/cyanide-burnout/MirrorFlayer/2.0.0/mirrorflayer-2.0.0-1.rockspec
+tt rocks install https://raw.githubusercontent.com/cyanide-burnout/MirrorFlayer/main/mirrorflayer-scm-1.rockspec   # main
 tt rocks make mirrorflayer-scm-1.rockspec   # from a checkout
 ```
 
