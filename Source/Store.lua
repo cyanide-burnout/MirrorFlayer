@@ -5,9 +5,11 @@ local msgpack = require('msgpack')
 local key_def = require('key_def')
 local log     = require('log')
 
-local errors = require('MirrorFlayer.Failure')
+local errors  = require('MirrorFlayer.Failure')
+local convert = require('MirrorFlayer.Column')
 
-local NULL = box.NULL
+local NULL      = box.NULL
+local UNCHANGED = convert.UNCHANGED
 
 -- Targets --------------------------------------------------------------------
 
@@ -106,11 +108,39 @@ local function same(left, right)
   return true
 end
 
+-- Fields a change did not send take the values of the stored tuple, or
+-- NULL when there is none (function targets get NULL)
+function Target:complete(after, before)
+  local stored
+  for index = 1, #after do
+    if rawequal(after[index], UNCHANGED) then
+      if stored == nil and self.space ~= nil then
+        stored = self.space:get(self:keyof(before or after)) or false
+      end
+      local value = stored and stored[index]
+      if value == nil then
+        value = NULL
+      end
+      after[index] = value
+    end
+  end
+end
+
 -- Applies one change: operation 'insert' | 'update' | 'delete', old and new
 -- are source rows. Runs inside a transaction and must not yield.
 function Target:apply(operation, old, new)
   local before = old ~= nil and self:tuple(old) or nil
   local after  = new ~= nil and self:tuple(new) or nil
+  if after ~= nil then
+    self:complete(after, before)
+  end
+  if before ~= nil then
+    for index = 1, #before do
+      if rawequal(before[index], UNCHANGED) then
+        before[index] = NULL
+      end
+    end
+  end
   if self.call ~= nil then
     self.call(operation, before, after)
     return

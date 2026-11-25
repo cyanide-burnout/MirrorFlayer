@@ -79,10 +79,14 @@ installed as `MirrorFlayer/MySQL/`, its `init.lua` being the driver itself.
 | `MirrorFlayer.MySQL.GTID` | MySQL dialect: GTID sets, GTID_LOG_EVENT, `COM_BINLOG_DUMP_GTID` |
 | `MirrorFlayer.MySQL.BinLog` | events: FORMAT_DESCRIPTION, ROTATE, QUERY, XID, TABLE_MAP, ROWS v1/v2, CRC32 |
 | `MirrorFlayer.MySQL.Column` | types of MySQL, text and binlog values, NULL bitmaps, binary JSON |
+| `MirrorFlayer.PostgreSQL` (`Source/PostgreSQL/init.lua`) | the driver of PostgreSQL: session, catalogue, slot with an exported snapshot, pgoutput stream, standby status |
+| `MirrorFlayer.PostgreSQL.Protocol` | frontend/backend protocol 3.0, SSLRequest, SCRAM-SHA-256, md5, simple query with a streamed result, CopyBoth |
+| `MirrorFlayer.PostgreSQL.Output` | pgoutput 1: Begin, Commit, Relation, Insert, Update, Delete, Truncate; LSNs |
+| `MirrorFlayer.PostgreSQL.Column` | types by OID, text values, intervals in ISO 8601 |
 
 ### Drivers
 
-`config.type` picks the driver, `'mysql'` by default. The engine knows nothing
+`config.type` picks the driver, `'mysql'` by default, or `'postgresql'`. The engine knows nothing
 of binlogs: a driver gives it a session on one host.
 
 | Call | Does |
@@ -98,6 +102,33 @@ A change is `{ source, operation, old, new }`. A failure with `reload` (a
 position the source no longer has, a table changed under the stream) makes
 the next connection begin with a full load. `driver.PORT`, `driver.key(config)`
 (the default key of the position) and `driver.check(config)` complete it.
+
+### PostgreSQL
+
+The replication connection has `replication=database` and runs catalogue
+queries too. `position()` drops the slot if it is there (`DROP_REPLICATION_SLOT
+... WAIT`, it may still be held by the previous session) and creates it with
+`CREATE_REPLICATION_SLOT ... LOGICAL pgoutput EXPORT_SNAPSHOT`; a second,
+ordinary connection opens `REPEATABLE READ` with `SET TRANSACTION SNAPSHOT`
+before the replication connection does anything else, and `load()` reads
+there. `stream()` commits it and sends `START_REPLICATION SLOT ... LOGICAL
+lsn (proto_version '1', publication_names ...)`.
+
+In the stream, XLogData carries the pgoutput messages, a keepalive the end of
+WAL sent so far: outside a transaction the position moves there
+(`handler:advance()`), so an idle source does not leave the position behind.
+The standby status update reports the LSN of the last applied commit at most
+once a second and on request; when the server is silent for `heartbeat`
+seconds, the driver asks for a keepalive (`reply` set), and three periods
+without data reconnect. `Transport:wait()` waits for data without reading it
+for that.
+
+A Relation message describes a table before its first change and after DDL;
+its columns are bound by name and type OID to the columns of the source,
+which are described again when they differ. Values come as text in protocol
+1, printed by the same output functions as the snapshot. A position is
+`slot/X/Y`; a slot that is gone (42704 on `START_REPLICATION`) asks for a
+full load.
 
 ### Stream request (MariaDB)
 

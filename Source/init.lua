@@ -1,6 +1,7 @@
 -- MirrorFlayer: replication of source tables into Tarantool spaces, in a
 -- fiber of Tarantool itself. The source is a driver: MirrorFlayer.MySQL
--- (MySQL and MariaDB over the binlog). The engine keeps the fiber, hosts,
+-- (MySQL and MariaDB over the binlog) or MirrorFlayer.PostgreSQL (logical
+-- replication with pgoutput). The engine keeps the fiber, hosts,
 -- retries, transactions, positions, statistics and metrics.
 --
 --   local MirrorFlayer = require('MirrorFlayer')
@@ -19,7 +20,8 @@ local store = require('MirrorFlayer.Store')
 
 -- Source drivers by config.type
 local DRIVERS = {
-  mysql = 'MirrorFlayer.MySQL'
+  mysql = 'MirrorFlayer.MySQL',
+  postgresql = 'MirrorFlayer.PostgreSQL'
 }
 
 local DEFAULTS = {
@@ -57,12 +59,13 @@ local function check(condition, format, ...)
 end
 
 -- Creates a replicator; the connection settings are checked by start().
--- config: type ('mysql', the default), hosts (array of 'host[:port]'), user,
--- password, server (replica server id of MySQL and MariaDB), tls (false, true
+-- config: type ('mysql', the default, or 'postgresql'), hosts (array of
+-- 'host[:port]'), user, password, server (replica server id of MySQL and
+-- MariaDB), database, slot and publication (of PostgreSQL), tls (false, true
 -- or { verify = 'none' | 'ca' | 'identity', ca, cert, key }), public_key (PEM
 -- of the source for caching_sha2_password without TLS, asked from the server
 -- when missing), position (space name), key (of the position, the server id
--- of MySQL by default), name (in logs and metrics), datetime ('datetime' or
+-- of MySQL or the slot of PostgreSQL by default), name (in logs and metrics), datetime ('datetime' or
 -- 'number'), json ('map' or 'string'), uuid ('uuid', 'binary' or 'string'),
 -- heartbeat (seconds), timeout (seconds), batch (rows per transaction), retry
 -- (seconds between connection attempts)
@@ -75,7 +78,7 @@ local function new(config)
   for key, value in pairs(config) do
     options[key] = value
   end
-  check(DRIVERS[options.type] ~= nil, "config.type must be 'mysql'")
+  check(DRIVERS[options.type] ~= nil, "config.type must be 'mysql' or 'postgresql'")
   local driver = require(DRIVERS[options.type])
   check(type(options.position) == 'string', 'config.position must be a space name')
   check(type(options.name) == 'string', 'config.name must be a string')
@@ -210,6 +213,16 @@ function Replica:started()
   self.status = 'streaming'
   self.stats.error = nil
   self:say('info', 'streaming from %s', self.stats.position ~= '' and self.stats.position or '(start)')
+end
+
+-- The source moved on without changes for the mapped tables (a keepalive of
+-- PostgreSQL); the position is written at most once a second
+function Replica:advance(state)
+  self.stats.position = state
+  self.dirty = true
+  if clock.time() - (self.stored or 0) >= 1 then
+    self:flush()
+  end
 end
 
 function Replica:heartbeat()

@@ -1,8 +1,9 @@
 # MirrorFlayer
 
-A Tarantool module that replicates MySQL/MariaDB tables into Tarantool spaces
-over the replication protocol (binlog). It runs inside Tarantool itself, in
-fibers: no separate process, no YAML, no MySQL sources or client library.
+A Tarantool module that replicates MySQL, MariaDB and PostgreSQL tables into
+Tarantool spaces over their replication protocols: the binlog of MySQL and
+MariaDB, logical replication with pgoutput of PostgreSQL. It runs inside
+Tarantool itself, in fibers: no separate process, no YAML, no client library.
 
 The goal of the project is to replace
 [tarantool/mysql-tarantool-replication](https://github.com/tarantool/mysql-tarantool-replication)
@@ -11,15 +12,20 @@ library, configured in YAML and writing into Tarantool over the network —
 with a replicator that lives inside Tarantool, where every value gets its
 Tarantool type.
 
-MariaDB and MySQL, with or without TLS; `mysql_native_password`,
-`caching_sha2_password` and `sha256_password`. Internals, OpenSSL findings
-and the plan are in [Documentation/Design.md](Documentation/Design.md).
+MariaDB, MySQL and PostgreSQL, with or without TLS; `mysql_native_password`,
+`caching_sha2_password`, `sha256_password`, `SCRAM-SHA-256` and `md5`.
+Internals and OpenSSL findings are in
+[Documentation/Design.md](Documentation/Design.md).
 
-Requires Tarantool 3.x and a source with `log_bin`, `binlog_format=ROW`,
-`binlog_row_image=FULL` and GTIDs: always there in MariaDB, `gtid_mode=ON`
-in MySQL. MySQL must not compress transactions
-(`binlog_transaction_compression=OFF`, the default) nor log partial JSON
-updates (`binlog_row_value_options` empty, the default).
+Requires Tarantool 3.x and
+
+* MySQL or MariaDB with `log_bin`, `binlog_format=ROW`,
+  `binlog_row_image=FULL` and GTIDs: always there in MariaDB, `gtid_mode=ON`
+  in MySQL. MySQL must not compress transactions
+  (`binlog_transaction_compression=OFF`, the default) nor log partial JSON
+  updates (`binlog_row_value_options` empty, the default);
+* or PostgreSQL 12 or later with `wal_level=logical`, free replication slots
+  and WAL senders, and a publication of the mapped tables.
 
 ## Usage
 
@@ -39,17 +45,33 @@ replica:reload() -- restart with a full load over the spaces
 replica:stop()
 ```
 
+PostgreSQL, with a slot and a publication of its own:
+
+```lua
+local replica = MirrorFlayer.new({
+  type = 'postgresql', hosts = { 'pg.example.com' },
+  user = 'replica', password = '...', database = 'registry',
+  slot = 'mirrorflayer', publication = 'mirrorflayer'
+})
+replica:map('public', 'locations', 'GlobalLocations')
+replica:start()
+```
+
 Configuration is Lua only.
 
 | Option      | Default        | Meaning |
 |-------------|----------------|---------|
-| `hosts`     | —              | `'host[:port]'` list; the next one is tried after a failure (Galera nodes) |
-| `user`, `password` | —       | Replication user: `REPLICATION SLAVE`, `BINLOG MONITOR` (`REPLICATION CLIENT`), `SELECT` on the mapped tables |
-| `server`    | —              | Server id of this replica, unique among the replicas of the source |
+| `type`      | `'mysql'`      | Source: `'mysql'` (MySQL and MariaDB) or `'postgresql'` |
+| `hosts`     | —              | `'host[:port]'` list, port 3306 or 5432 by default; the next one is tried after a failure (Galera nodes) |
+| `user`, `password` | —       | MySQL: `REPLICATION SLAVE`, `BINLOG MONITOR` (`REPLICATION CLIENT`), `SELECT` on the mapped tables. PostgreSQL: a role with `REPLICATION`, `USAGE` on the schemas and `SELECT` on the tables |
+| `server`    | —              | MySQL: server id of this replica, unique among the replicas of the source |
+| `database`  | `user`         | PostgreSQL: the database |
+| `slot`      | `'mirrorflayer'` | PostgreSQL: the logical replication slot, one per replicator |
+| `publication` | `'mirrorflayer'` | PostgreSQL: the publication of the mapped tables (`CREATE PUBLICATION mirrorflayer FOR TABLE ...`) |
 | `tls`       | `false`        | `true` for TLS without verification, or `{ verify = 'none' \| 'ca' \| 'identity', ca = 'ca.pem', cert = 'client.pem', key = 'client.key' }`; with `ca` verification defaults to `'ca'`, without it to `'none'`; `'ca'` and `'identity'` without `ca` use the system store. Needs `MirrorFlayer.TLS` |
 | `public_key` | —             | PEM public key of the source for `caching_sha2_password`/`sha256_password` without TLS; without it the key is asked from the server (open to a man in the middle) |
 | `position`  | `'ReplicatorPositions'` | Space that keeps the position, created when missing with a key of the type of `key` |
-| `key`       | `server`       | Key of the position in that space: a stable number or string of this replicator, the replica server id by default |
+| `key`       | `server`, `slot` | Key of the position in that space: a stable number or string of this replicator, the replica server id of MySQL or the slot of PostgreSQL by default |
 | `datetime`  | `'datetime'`   | Dates and times: `'datetime'` (`datetime` and `interval` of Tarantool) or `'number'` (seconds), see *Values* |
 | `json`      | `'map'`        | JSON: `'map'` (MsgPack maps and arrays) or `'string'` (the text the server prints), see *Values* |
 | `uuid`      | `'uuid'`       | UUID: `'uuid'` (`uuid` of Tarantool), `'binary'` (16 bytes in network byte order, `varbinary`) or `'string'` (canonical text, lowercase) |
@@ -62,6 +84,8 @@ Configuration is Lua only.
 ### Mapping
 
 `replica:map(database, table, target, columns)` — only before `start()`.
+For PostgreSQL `database` is the schema; schema, table and column names are
+the ones of the catalogue, case-sensitive.
 Targets are looked up by the replication fiber, so `start()` may come before
 the spaces are made; a missing space is retried with the connection, other
 mapping errors stop the replicator (`stat().error`).
@@ -89,9 +113,10 @@ is aborted.
 
 ## Values
 
-One conversion table (`MirrorFlayer.MySQL.Column` over `MirrorFlayer.Column`) serves both the snapshot of the
-full load and the row images of the stream, so a row gives the same tuple
-either way. Every value gets its Tarantool type.
+One conversion table per driver (`MirrorFlayer.MySQL.Column`,
+`MirrorFlayer.PostgreSQL.Column`, both over `MirrorFlayer.Column`) serves the
+snapshot of the full load and the changes of the stream, so a row gives the
+same tuple either way. Every value gets its Tarantool type.
 
 ### MySQL and MariaDB
 
@@ -126,12 +151,53 @@ Binlog row images carry no names, signedness or member lists; they come from
 `information_schema.COLUMNS` on every connection and again after DDL. Types
 not listed (`INET4`, `INET6`, geometry) are refused when mapped.
 
+### PostgreSQL
+
+| Source type | Tarantool value |
+|-------------|-----------------|
+| `smallint`, `integer`, `bigint`, `oid` | number; `int64_t` cdata beyond 2^53 |
+| `real` | number, rounded to single precision |
+| `double precision` | number; `NaN` and `±Infinity` as they are |
+| `numeric` | `decimal`; `NaN` and `±Infinity` as `box.NULL` |
+| `boolean` | boolean |
+| `timestamp`, `timestamptz` | `datetime` in UTC with fractions; `'number'`: seconds since the Unix epoch |
+| `date` | `datetime` at midnight UTC; `'number'`: seconds since the Unix epoch |
+| `±infinity` dates | `box.NULL` |
+| `time` | `interval`; `'number'`: seconds |
+| `interval` | `interval` with years, months, days and time; `'number'`: seconds, a month counted as 30 days and a year as 365.25 days, as `EXTRACT(EPOCH)` does |
+| `char`, `varchar`, `text`, `name`, `citext` and other string types, `inet`, `cidr`, `macaddr`, `xml` | string (`char(n)` padded as PostgreSQL prints it) |
+| enums | member string |
+| `bytea` | `varbinary` (MP_BIN) |
+| `json`, `jsonb` | MsgPack map or array, JSON `null` as `box.NULL`; `'string'`: the text the server prints |
+| `uuid` | `uuid`; `'binary'`: 16 bytes in network byte order; `'string'`: canonical text |
+| domains | as their base type |
+| `NULL` | `box.NULL` |
+
+The session prints dates in ISO with `TimeZone=UTC`, so `timestamptz` comes
+in UTC. Arrays, `timetz`, ranges, geometry and dates BC are refused when
+mapped or met.
+
+The full load creates the slot anew with an exported snapshot and reads the
+tables in that snapshot over a second connection: the load and the stream
+meet exactly. The stream confirms the LSN of every applied transaction, so
+the server frees the WAL before it; a slot keeps WAL while the replicator is
+away, drop it with `pg_drop_replication_slot()` when the replicator is gone
+for good. A slot that is gone means a full load.
+
+`UPDATE` and `DELETE` carry the old key of the `REPLICA IDENTITY` (the
+primary key by default): the primary key of a target space has to be among
+its columns, or the table needs `REPLICA IDENTITY FULL`; a function target
+gets the other old values as `NULL`. A TOAST value an update did not touch
+is not sent: the target keeps the one it has. `TRUNCATE` of a mapped table
+means a full load.
+
 ## Build and install
 
 `Source/` holds the engine and the shared Lua modules, `Source/MySQL/` the
-driver of MySQL and MariaDB; they are installed as
-`$(PREFIX)/share/tarantool/MirrorFlayer/` and `MirrorFlayer/MySQL/`, which is
-what `require('MirrorFlayer')` finds. Only `init.lua` is lowercase: that is the
+driver of MySQL and MariaDB, `Source/PostgreSQL/` the driver of PostgreSQL;
+they are installed as `$(PREFIX)/share/tarantool/MirrorFlayer/` with the
+`MySQL/` and `PostgreSQL/` subdirectories, which is what
+`require('MirrorFlayer')` finds. Only `init.lua` is lowercase: that is the
 file Lua looks for in a package directory. `Source/TLS.c` is `MirrorFlayer.TLS`, installed as
 `$(PREFIX)/lib/<triplet>/tarantool/MirrorFlayer/TLS.so`; it needs the headers
 of `tarantool-dev` and `libssl-dev` and links the system OpenSSL.
@@ -157,23 +223,27 @@ tt rocks make mirrorflayer-scm-1.rockspec   # from a checkout
 ## Tests
 
 `Tests/DockerTest.sh` builds `TLS.so`, runs MariaDB or MySQL with a row-based
-binlog and Tarantool 3 in Docker and drives `Tests/MirrorFlayerTest.lua`
-through phases. `SERVER=mariadb|mysql` picks the source (`mariadb:11.4`,
-`mysql:8.4`, `SERVER_IMAGE` overrides), `TLS=off|on|ca` the connection of the
-replicator (`ca` verifies against the CA of the MySQL server). MySQL users
-authenticate with `caching_sha2_password`, so a run without TLS goes through
-RSA first and the server cache later.
+binlog, or PostgreSQL with `wal_level=logical`, and Tarantool 3 in Docker and
+drives `Tests/MirrorFlayerTest.lua` or `Tests/PostgreSQLTest.lua` through
+phases. `SERVER=mariadb|mysql|postgresql` picks the source (`mariadb:11.4`,
+`mysql:8.4`, `postgres:17`, `SERVER_IMAGE` overrides), `TLS=off|on|ca` the
+connection of the replicator (`ca` verifies against the CA of the server).
+MySQL users authenticate with `caching_sha2_password`, so a run without TLS
+goes through RSA first and the server cache later; PostgreSQL users with
+`SCRAM-SHA-256`.
 
 1. `load` — tables with data exist before the start: full load, values of all
    types, then INSERT/UPDATE/DELETE over the stream, a key change, a
    multi-table transaction, `on_replace` triggers, a trigger that yields and a
    function target; two more replicators check `datetime = 'number'`,
    `json = 'string'`, `uuid = 'string'` and `uuid = 'binary'` over the load
-   and the stream.
+   and the stream. PostgreSQL also keeps a TOAST value an update did not
+   send.
 2. `resume` — changes made while Tarantool is down; restart continues from the
-   stored GTID without a full load.
-3. `purge` — changes and a purge of the binlog while down: error 1236, full
-   load that also deletes rows gone from the source.
+   stored position without a full load.
+3. `purge` — changes and a lost position while down (a purge of the binlog,
+   error 1236; a dropped slot): full load that also deletes rows gone from
+   the source.
 4. `late` — a fresh instance started before its space exists retries, loads
    everything once the space is made, and stops quietly when its fiber is
    cancelled from outside.
@@ -182,7 +252,7 @@ RSA first and the server cache later.
 runs the test there with the same variables:
 
 ```
-SERVER=mysql TLS=ca Tests/RemoteTest.sh docker-host
+SERVER=postgresql TLS=ca Tests/RemoteTest.sh docker-host
 ```
 
 

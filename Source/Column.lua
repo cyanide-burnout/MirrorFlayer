@@ -26,6 +26,10 @@ local sub = string.sub
 
 local NULL = box.NULL
 
+-- A value a source did not send because the change did not touch it (TOAST
+-- of PostgreSQL): the target keeps what it has. Compared with rawequal.
+local UNCHANGED = setmetatable({}, { __tostring = function () return 'UNCHANGED' end })
+
 local status, varbinary = pcall(require, 'varbinary')
 local binary
 if status and varbinary.new ~= nil then
@@ -155,6 +159,7 @@ end
 
 return {
   NULL = NULL,
+  UNCHANGED = UNCHANGED,
   binary = binary,
   integer = integer,
   float = float,
