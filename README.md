@@ -257,7 +257,7 @@ file Lua looks for in a package directory. `Source/TLS.c` is `MirrorFlayer.TLS`,
 of `tarantool-dev` and `libssl-dev` and links the system OpenSSL.
 
 ```
-make                                       # Source/TLS.so
+make                                       # Source/TLS.so, stripped (STRIP=true keeps it as built)
 make install [PREFIX=/usr] [DESTDIR=...]   # Lua modules and TLS.so
 make check                                 # syntax check with tarantool
 make test                                  # Docker test, see Tests/

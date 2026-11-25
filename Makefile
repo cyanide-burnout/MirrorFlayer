@@ -10,9 +10,12 @@ SSH       ?= ssh
 # MirrorFlayer.TLS (Source/TLS.so) is a C module: TLS over the connected socket and RSA for caching_sha2_password.
 # It needs the headers of tarantool-dev and libssl-dev; TLS=0 leaves it out, then only plain connections and
 # mysql_native_password (or caching_sha2_password from its cache) work
+# TLS.so is stripped with <triplet>-strip of $(CC) when there is one (a cross build), with strip otherwise;
+# STRIP=true keeps the debug info
 
 MACHINE := $(shell $(CC) -dumpmachine)
 LIBDIR  ?= $(PREFIX)/lib/$(MACHINE)/tarantool
+STRIP   ?= $(if $(shell command -v $(MACHINE)-strip 2>/dev/null),$(MACHINE)-strip,strip)
 MODULES := $(wildcard Source/*.lua)
 MYSQL   := $(wildcard Source/MySQL/*.lua)
 PGSQL   := $(wildcard Source/PostgreSQL/*.lua)
@@ -24,6 +27,7 @@ all: $(LIBRARY)
 
 Source/TLS.so: Source/TLS.c
 	$(CC) $(CFLAGS) -shared $< $(LDFLAGS) -lssl -lcrypto -o $@
+	$(STRIP) $@
 
 check:
 	@for file in $(MODULES) $(MYSQL) $(PGSQL) Tests/*.lua; do \
