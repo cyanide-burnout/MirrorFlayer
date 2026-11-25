@@ -22,7 +22,8 @@ connections work.
 }
 
 dependencies = {
-  'lua >= 5.1'
+  'lua ~> 5.1',
+  'tarantool >= 3.0'
 }
 
 external_dependencies = {
@@ -31,31 +32,15 @@ external_dependencies = {
 }
 
 build = {
-  type    = 'builtin',
-  modules = {
-    ['MirrorFlayer']                     = 'Source/init.lua',
-    ['MirrorFlayer.Column']              = 'Source/Column.lua',
-    ['MirrorFlayer.Failure']             = 'Source/Failure.lua',
-    ['MirrorFlayer.Runner']              = 'Source/Runner.lua',
-    ['MirrorFlayer.Store']               = 'Source/Store.lua',
-    ['MirrorFlayer.Thread']              = 'Source/Thread.lua',
-    ['MirrorFlayer.Transport']           = 'Source/Transport.lua',
-    ['MirrorFlayer.MySQL']               = 'Source/MySQL/init.lua',
-    ['MirrorFlayer.MySQL.BinLog']        = 'Source/MySQL/BinLog.lua',
-    ['MirrorFlayer.MySQL.Column']        = 'Source/MySQL/Column.lua',
-    ['MirrorFlayer.MySQL.GTID']          = 'Source/MySQL/GTID.lua',
-    ['MirrorFlayer.MySQL.MariaDB']       = 'Source/MySQL/MariaDB.lua',
-    ['MirrorFlayer.MySQL.Protocol']      = 'Source/MySQL/Protocol.lua',
-    ['MirrorFlayer.PostgreSQL']          = 'Source/PostgreSQL/init.lua',
-    ['MirrorFlayer.PostgreSQL.Column']   = 'Source/PostgreSQL/Column.lua',
-    ['MirrorFlayer.PostgreSQL.Output']   = 'Source/PostgreSQL/Output.lua',
-    ['MirrorFlayer.PostgreSQL.Protocol'] = 'Source/PostgreSQL/Protocol.lua',
-    ['MirrorFlayer.TLS']                 = {
-      sources   = { 'Source/TLS.c' },
-      defines   = { '_GNU_SOURCE' },
-      incdirs   = { '$(OPENSSL_INCDIR)', '$(TARANTOOL_INCDIR)/tarantool' },
-      libdirs   = { '$(OPENSSL_LIBDIR)' },
-      libraries = { 'ssl', 'crypto' }
-    }
+  -- The Makefile builds Source/TLS.so (stripped) and installs it with the Lua modules into the tree of the rock
+  type              = 'make',
+  build_variables   = {
+    CC      = '$(CC)',
+    CFLAGS  = '$(CFLAGS) -D_GNU_SOURCE -I$(OPENSSL_INCDIR) -I$(TARANTOOL_INCDIR)/tarantool',
+    LDFLAGS = '-L$(OPENSSL_LIBDIR)'
+  },
+  install_variables = {
+    LUADIR = '$(LUADIR)',
+    LIBDIR = '$(LIBDIR)'
   }
 }
