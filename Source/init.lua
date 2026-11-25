@@ -42,6 +42,14 @@ local DEFAULTS = {
 local Replica = {}
 Replica.__index = Replica
 
+-- Replicators running in this instance: by the name, by the position space
+-- and the key; two of them must not share either
+local running = { names = {}, keys = {} }
+
+local function slot(config)
+  return config.position .. '\0' .. type(config.key) .. ':' .. tostring(config.key)
+end
+
 local function check(condition, format, ...)
   if not condition then
     error(string.format(format, ...), 3)
@@ -155,7 +163,7 @@ function Replica:bind()
       table.insert(source.targets, store.target(spec.target, spec.columns))
     end
   end
-  self.positions = store.position(self.config.position, self.config.key, self.config.name)
+  self.positions = store.position(self.config.position, self.config.key, self.config.name, self.config.type)
   self.bound     = true
 end
 
@@ -380,6 +388,12 @@ function Replica:start()
   check(config.password == nil or type(config.password) == 'string', 'config.password must be a string')
   local problem = self.driver.check(config)
   check(problem == nil, '%s', problem)
+  local other = running.names[config.name]
+  check(other == nil or other == self, 'a replicator named %s is running, give config.name of its own', config.name)
+  other = running.keys[slot(config)]
+  check(other == nil or other == self,
+    'a replicator keeps its position in %s under %s already, give config.key of its own', config.position,
+    tostring(config.key))
   local thread
   if config.thread ~= nil then
     thread = require('MirrorFlayer.Thread')
@@ -403,6 +417,8 @@ function Replica:start()
     self.fiber  = self.runner:start()
   end
   self.running = true
+  running.names[config.name] = self
+  running.keys[slot(config)]  = self
   return self
 end
 
@@ -418,6 +434,8 @@ function Replica:stop()
     self.fiber = nil
   end
   self.running = false
+  running.names[self.config.name] = nil
+  running.keys[slot(self.config)]  = nil
   self:cleanup()
   self:unregister()
   self.status = 'stopped'
@@ -464,5 +482,5 @@ end
 
 return {
   new = new,
-  _VERSION = '2.2.0'
+  _VERSION = '2.2.1'
 }

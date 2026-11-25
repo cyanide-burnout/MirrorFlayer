@@ -430,6 +430,17 @@ local function load()
   ok(triggered >= 100, 'on_replace triggers fired during the load (%d)', triggered)
   stored_position(replica, KEY, target)
 
+  -- Two replicators of one instance share neither a name nor a position key
+  local twin = MirrorFlayer.new(threaded({ hosts = { HOST .. ':3306' }, user = 'replica', password = 'secret', server = KEY }))
+  twin:map('Registry', 'Locations', 'GlobalLocations', { 'ID' })
+  local status, problem = pcall(twin.start, twin)
+  ok(not status and string.find(tostring(problem), 'config.name', 1, true) ~= nil,
+    'a second replicator of the same name is refused: %s', tostring(problem))
+  twin.config.name = 'Twin'
+  status, problem = pcall(twin.start, twin)
+  ok(not status and string.find(tostring(problem), 'config.key', 1, true) ~= nil,
+    'a second replicator of the same position key is refused: %s', tostring(problem))
+
   local inserts = journal.insert
   triggered = 0
   exec('USE Registry',
@@ -588,6 +599,10 @@ local function purge()
 end
 
 local function late()
+  -- Under its key lies a position of another kind of source: not taken, a full load
+  box.schema.space.create('ReplicatorPositions', { if_not_exists = true })
+  box.space.ReplicatorPositions:create_index('ID', { if_not_exists = true, parts = { 1, 'unsigned' } })
+  box.space.ReplicatorPositions:replace({ KEY, 'mirrorflayer/0/16B3748', 0, 'postgresql' })
   -- Started before its space exists, as when a later plug-in makes it
   local replica = replicator(true)
   wait(function () return string.find(tostring(replica:stat().error), 'does not exist', 1, true) ~= nil end, 'a missing space')
@@ -601,6 +616,7 @@ local function late()
   ok(box.space.GlobalLocations:get(600) ~= nil, 'the row inserted meanwhile is there')
   stored_position(replica, KEY, target)
   ok(box.space.ReplicatorPositions:get(KEY)[3] > 0, 'event time stored next to the position')
+  ok(box.space.ReplicatorPositions:get(KEY)[4] == 'mysql', 'the position of another kind was replaced by one of mysql')
   -- Cancelled from outside, as on shutdown: no error, just stopped
   -- In TX its fiber may be cancelled from outside; in a thread stop() does it
   if THREAD then

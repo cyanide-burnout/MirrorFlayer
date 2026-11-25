@@ -5,6 +5,7 @@ local msgpack = require('msgpack')
 local key_def = require('key_def')
 local log     = require('log')
 
+local log     = require('log')
 local errors  = require('MirrorFlayer.Failure')
 local convert = require('MirrorFlayer.Column')
 
@@ -358,8 +359,10 @@ local NUMERIC = { unsigned = true, integer = true, number = true }
 
 -- Opens the position space, created when missing with a key of the type of
 -- key. key is a stable number or string of this replicator, the replica server
--- id by default; the tuple is { key, position, event_time }.
-local function position(space_name, key, name)
+-- id or the slot by default; the tuple is { key, position, event_time, kind },
+-- kind the type of the source ('mysql', 'postgresql'), so a position of
+-- another kind under the same key is not taken for its own.
+local function position(space_name, key, name, kind)
   local space = box.space[space_name]
   if space == nil then
     space = box.schema.space.create(space_name, { if_not_exists = true })
@@ -373,21 +376,28 @@ local function position(space_name, key, name)
   if (part == 'string' and type(key) ~= 'string') or (NUMERIC[part] and type(key) ~= 'number') then
     errors.fatal('position space %s has a %s key, the key %s does not fit it', space_name, part, tostring(key))
   end
-  return setmetatable({ space = space, key = key, name = name }, Position)
+  return setmetatable({ space = space, key = key, name = name, kind = kind }, Position)
 end
 
--- Returns the stored position or nil
+-- Returns the stored position or nil; a position of another kind of source
+-- is not used (a full load follows), one without the kind (older versions)
+-- is taken
 function Position:get()
   local tuple = self.space:get(self.key)
-  if tuple ~= nil and type(tuple[2]) == 'string' then
-    return tuple[2]
+  if tuple == nil or type(tuple[2]) ~= 'string' then
+    return nil
   end
-  return nil
+  if type(tuple[4]) == 'string' and tuple[4] ~= self.kind then
+    log.warn('MirrorFlayer[%s]: the position under %s is one of %s, not of %s; a full load follows', self.name,
+      tostring(self.key), tuple[4], tostring(self.kind))
+    return nil
+  end
+  return tuple[2]
 end
 
 -- Stores the position; call inside the transaction of the applied changes
 function Position:put(state, time)
-  self.space:replace({ self.key, state, time or 0 })
+  self.space:replace({ self.key, state, time or 0, self.kind })
 end
 
 return {

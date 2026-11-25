@@ -93,12 +93,12 @@ Configuration is Lua only.
 | `publication` | `'mirrorflayer'` | PostgreSQL: the publication of the mapped tables (`CREATE PUBLICATION mirrorflayer FOR TABLE ...`) |
 | `tls`       | `false`        | `true` for TLS without verification, or `{ verify = 'none' \| 'ca' \| 'identity', ca = 'ca.pem', cert = 'client.pem', key = 'client.key' }`; with `ca` verification defaults to `'ca'`, without it to `'none'`; `'ca'` and `'identity'` without `ca` use the system store. Needs `MirrorFlayer.TLS` |
 | `public_key` | —             | PEM public key of the source for `caching_sha2_password`/`sha256_password` without TLS; without it the key is asked from the server (open to a man in the middle) |
-| `position`  | `'ReplicatorPositions'` | Space that keeps the position, created when missing with a key of the type of `key` |
-| `key`       | `server`, `slot` | Key of the position in that space: a stable number or string of this replicator, the replica server id of MySQL or the slot of PostgreSQL by default |
+| `position`  | `'ReplicatorPositions'` | Space that keeps the position, created when missing with a key of the type of `key`; the tuple is `{ key, position, event time, type of the source }`, a position of another type under the same key is not taken (a full load follows) |
+| `key`       | `server`, `slot` | Key of the position in that space: a stable number or string of this replicator, the replica server id of MySQL or the slot of PostgreSQL by default; two replicators of an instance with the same `position` and `key` are refused by `start()`, so replicators of different sources with the same server id or slot need a `key` of their own |
 | `datetime`  | `'datetime'`   | Dates and times: `'datetime'` (`datetime` and `interval` of Tarantool) or `'number'` (seconds), see *Values* |
 | `json`      | `'map'`        | JSON: `'map'` (MsgPack maps and arrays) or `'string'` (the text the server prints), see *Values* |
 | `uuid`      | `'uuid'`       | UUID: `'uuid'` (`uuid` of Tarantool), `'binary'` (16 bytes in network byte order, `varbinary`) or `'string'` (canonical text, lowercase) |
-| `name`      | `'MirrorFlayer'` | Name in logs and the label of metrics |
+| `name`      | `'MirrorFlayer'` | Name in logs, the label of metrics and the name of the replicator in its thread: unique among the replicators of an instance, `start()` refuses a second one |
 | `heartbeat` | `10`           | Seconds between heartbeats of an idle source; no data for three periods reconnects |
 | `check`     | `30`           | Galera: seconds between checks that the node is ready (`wsrep_ready`, primary component); a node that is not is left for the next host, on connect as well |
 | `timeout`   | `30`           | Connect and query timeout, seconds |
@@ -270,7 +270,7 @@ and `caching_sha2_password` only while the server has the password cached
 With LuaRocks of Tarantool (`tt rocks`), the same headers are needed:
 
 ```
-tt rocks install https://raw.githubusercontent.com/cyanide-burnout/MirrorFlayer/2.2.0/mirrorflayer-2.2.0-1.rockspec
+tt rocks install https://raw.githubusercontent.com/cyanide-burnout/MirrorFlayer/2.2.1/mirrorflayer-2.2.1-1.rockspec
 tt rocks install https://raw.githubusercontent.com/cyanide-burnout/MirrorFlayer/main/mirrorflayer-scm-1.rockspec   # main
 tt rocks make mirrorflayer-scm-1.rockspec   # from a checkout
 ```

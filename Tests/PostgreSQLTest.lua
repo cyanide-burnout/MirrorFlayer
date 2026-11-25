@@ -578,6 +578,10 @@ local function purge()
 end
 
 local function late()
+  -- Under its key lies a position of another kind of source: not taken, a full load
+  box.schema.space.create('ReplicatorPositions', { if_not_exists = true })
+  box.space.ReplicatorPositions:create_index('ID', { if_not_exists = true, parts = { 1, 'string' } })
+  box.space.ReplicatorPositions:replace({ KEY, '0-1-5', 0, 'mysql' })
   local replica = replicator(true)
   wait(function () return string.find(tostring(replica:stat().error), 'does not exist', 1, true) ~= nil end, 'a missing space')
   ok(replica:stat().status ~= 'failed', 'a missing space is retried: %s', tostring(replica:stat().error))
@@ -590,6 +594,7 @@ local function late()
   ok(box.space.GlobalLocations:get(600) ~= nil, 'the row inserted meanwhile is there')
   stored_position(replica, KEY, target)
   ok(box.space.ReplicatorPositions:get(KEY)[3] > 0, 'event time stored next to the position')
+  ok(box.space.ReplicatorPositions:get(KEY)[4] == 'postgresql', 'the position of another kind was replaced by one of postgresql')
   -- In TX its fiber may be cancelled from outside; in a thread stop() does it
   if THREAD then
     replica:stop()
