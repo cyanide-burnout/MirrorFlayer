@@ -12,6 +12,8 @@ SSH       ?= ssh
 # mysql_native_password (or caching_sha2_password from its cache) work
 # TLS.so is stripped with <triplet>-strip of $(CC) when there is one (a cross build), with strip otherwise;
 # STRIP=true keeps the debug info
+# install puts the Lua modules into $(LUADIR)/MirrorFlayer and TLS.so into $(LIBDIR)/MirrorFlayer: LUADIR and LIBDIR
+# give another tree, such as Modules and Modules/<arch> of an application
 
 MACHINE := $(shell $(CC) -dumpmachine)
 LIBDIR  ?= $(PREFIX)/lib/$(MACHINE)/tarantool
@@ -26,7 +28,7 @@ override CFLAGS += -std=gnu99 -Wall -fPIC $(shell pkg-config --cflags tarantool 
 all: $(LIBRARY)
 
 Source/TLS.so: Source/TLS.c
-	$(CC) $(CFLAGS) -shared $< $(LDFLAGS) -lssl -lcrypto -o $@
+	$(CC) $(CFLAGS) -shared -z noexecstack $< $(LDFLAGS) -lssl -lcrypto -o $@
 	$(STRIP) $@
 
 check:
