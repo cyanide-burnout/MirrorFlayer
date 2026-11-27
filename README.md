@@ -13,7 +13,9 @@ with a replicator that lives inside Tarantool, where every value gets its
 Tarantool type.
 
 MariaDB, MySQL and PostgreSQL, with or without TLS; `mysql_native_password`,
-`caching_sha2_password`, `sha256_password`, `SCRAM-SHA-256` and `md5`. With
+`caching_sha2_password`, `sha256_password`, `client_ed25519`, `parsec`,
+`mysql_clear_password` and `dialog` (PAM of MariaDB, the password answers
+its password questions), `SCRAM-SHA-256` and `md5`. With
 MySQL and MariaDB the traffic is compressed (the compressed protocol, zlib),
 and the compressed binlog events of MariaDB (`log_bin_compress`) are read.
 Internals and OpenSSL findings are in
@@ -287,7 +289,7 @@ tt rocks make mirrorflayer-scm-1.rockspec   # from a checkout
 binlog, or PostgreSQL with `wal_level=logical`, and Tarantool 3 in Docker and
 drives `Tests/MirrorFlayerTest.lua` or `Tests/PostgreSQLTest.lua` through
 phases. `SERVER=mariadb|galera|mysql|postgresql` picks the source
-(`mariadb:11.4`, the same as a Galera cluster of one node, `mysql:8.4`,
+(`mariadb:11.8`, the same as a Galera cluster of one node, `mysql:8.4`,
 `postgres:17`, `SERVER_IMAGE` overrides), `TLS=off|on|ca` the
 connection of the replicator (`ca` verifies against the CA of the server).
 MySQL users authenticate with `caching_sha2_password`, so a run without TLS
@@ -296,7 +298,10 @@ goes through RSA first and the server cache later; PostgreSQL users with
 `THREAD=1` runs every replicator of the test in an application thread; it
 needs Tarantool 3.9 or later, `TARANTOOL_IMAGE=tarantool/tarantool:3.9.0`.
 MySQL and MariaDB connections are compressed, `COMPRESS=0` turns that off;
-`BINLOG_COMPRESS=1` makes MariaDB compress its binlog events.
+`BINLOG_COMPRESS=1` makes MariaDB compress its binlog events. MariaDB gets
+users of `ed25519`, `parsec` and `pam` (over `pam_unix`), the test logs in
+with each; `CLEARTEXT=1` makes PAM use `mysql_clear_password` instead of
+`dialog`.
 
 1. `load` — tables with data exist before the start: full load, values of all
    types, then INSERT/UPDATE/DELETE over the stream, a key change, a

@@ -40,6 +40,9 @@ local ROWS = {
 
 local HEADER = 19
 
+-- MirrorFlayer.Support: CRC32 and inflate of zlib; without it CRC32 in Lua and no compressed events
+local loaded, support = pcall(require, 'MirrorFlayer.Support')
+
 -- CRC32 (IEEE 802.3, as zlib) ------------------------------------------------
 
 local CRC = ffi.new('int32_t[256]')
@@ -56,6 +59,9 @@ for index = 0, 255 do
 end
 
 local function crc32(data, length)
+  if loaded then
+    return tobit(support.crc32(data, length))
+  end
   local pointer = ffi.cast('const uint8_t *', data)
   local value   = tobit(0xffffffff)
   for index = 0, length - 1 do
@@ -66,20 +72,14 @@ end
 
 -- Compressed content of MariaDB: 0x80 | algorithm << 4 | the count of length bytes, the length before compression
 -- (big-endian), then what compress() of zlib made, the only algorithm. Returns a reader of the content
-local support
-
 local function inflate(data)
   local first = data:u8()
   if band(first, 0xf0) ~= 0x80 then
     protocol.fatal('compressed binlog event: unknown format 0x%02x', first)
   end
   local length = data:be(band(first, 0x07))
-  if support == nil then
-    local status, module = pcall(require, 'MirrorFlayer.Support')
-    if not status then
-      protocol.fatal('compressed binlog events need MirrorFlayer.Support (Support.so): %s', tostring(module))
-    end
-    support = module
+  if not loaded then
+    protocol.fatal('compressed binlog events need MirrorFlayer.Support (Support.so): %s', tostring(support))
   end
   return protocol.reader(support.uncompress(data:rest(), length))
 end

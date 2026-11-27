@@ -84,7 +84,7 @@ installed as `MirrorFlayer/MySQL/`, its `init.lua` being the driver itself.
 | `MirrorFlayer.Column` | values in their Tarantool types, datetime and json modes |
 | `MirrorFlayer.Store` | targets, pacing of writes, full load, position |
 | `MirrorFlayer.Transport` | `read(n)`/`write(s)`/`close()`; plain TCP over the Tarantool `socket`, `secure()` moves it onto TLS |
-| `MirrorFlayer.Support` (`Source/Support.c` → `Support.so`, `TLS.so` up to 2.2) | TLS over the already connected descriptor, RSA-OAEP for `caching_sha2_password` and `sha256_password`, inflate (zlib) for the compressed protocol and the compressed events of MariaDB |
+| `MirrorFlayer.Support` (`Source/Support.c` → `Support.so`, `TLS.so` up to 2.2) | TLS over the already connected descriptor, RSA-OAEP for `caching_sha2_password` and `sha256_password`, inflate (zlib) for the compressed protocol and the compressed events of MariaDB, CRC32 of binlog events, Ed25519 of `client_ed25519` and `parsec` |
 | `MirrorFlayer.MySQL` (`Source/MySQL/init.lua`) | the driver of MySQL and MariaDB: session, columns, snapshot, binlog stream and its events |
 | `MirrorFlayer.MySQL.Protocol` | packets, greeting, SSL Request, authentication, `COM_QUERY` with a streamed text result |
 | `MirrorFlayer.MySQL.MariaDB` | MariaDB dialect: GTID state, GTID event, `COM_BINLOG_DUMP` after `@slave_connect_state` |
@@ -235,6 +235,27 @@ compressed) and `WRITE/UPDATE/DELETE_ROWS_COMPRESSED(_V1)` (the rows after the
 column bitmaps are compressed): a header byte `0x80 | algorithm << 4 |
 count of length bytes`, the length before compression big-endian, then zlib
 (algorithm 0, the only one). The checksum covers the event as written.
+
+### Authentication of MariaDB
+
+* `client_ed25519`: the server sends a nonce of 32 bytes in the switch
+  request, the client answers with an Ed25519 signature whose expanded key is
+  SHA-512 of the password itself (not of a 32-byte seed). EVP of OpenSSL
+  takes only seeds, so `Support.c` does the group operations of
+  edwards25519 over BIGNUM (extended coordinates, the unified addition);
+  checked against the vectors of RFC 8032, where a 32-byte password is a seed.
+* `parsec` (11.6 and later): a scramble of the server in the switch request,
+  an empty answer asks for `'P'`, the iteration factor and 18 bytes of salt;
+  the key is PBKDF2-HMAC-SHA512 over `1024 << factor` rounds, the answer a
+  scramble of the client and the Ed25519 signature (EVP) of both scrambles.
+  A factor whose rounds do not fit into the timeout is refused, as the client
+  library of MariaDB does.
+* `mysql_clear_password` sends the password; `dialog` answers questions of
+  type 4 and 5 (passwords) with it and refuses the others.
+* After the first packet the server prefixes the data of a plugin with 1, the
+  switch request keeps it as it is: a nonce may end with a zero byte.
+* The CRC32 of binlog events is `crc32()` of zlib when `Support.so` is there,
+  a table in Lua otherwise.
 
 ## Plan
 

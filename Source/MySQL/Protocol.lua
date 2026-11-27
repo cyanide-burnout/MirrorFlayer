@@ -382,14 +382,36 @@ function Connection:command(payload)
   self:write_packet(payload)
 end
 
+-- MirrorFlayer.Support for an authentication plugin, why tells what for
+local function support(plugin, why)
+  local status, module = pcall(require, 'MirrorFlayer.Support')
+  if not status then
+    fatal('%s needs MirrorFlayer.Support (Support.so) for %s: %s', plugin, why, tostring(module))
+  end
+  return module
+end
+
 -- Password for the full authentication of caching_sha2_password and
 -- sha256_password without TLS: RSA-OAEP with the public key of the server
 function Connection:encrypt(pem)
-  local status, support = pcall(require, 'MirrorFlayer.Support')
-  if not status then
-    fatal('%s without TLS needs MirrorFlayer.Support (Support.so) for RSA: %s', self.plugin, tostring(support))
+  return support(self.plugin, 'RSA without TLS').encrypt(pem, xor(self.password .. '\0', self.scramble))
+end
+
+-- dialog (PAM of MariaDB): a question is its type and its text; 4 and 5 ask
+-- for the password, 2 and 3 for something else, an odd type is the last one
+function Connection:answer(question)
+  local kind = byte(question, 1) or 4
+  if math.floor(kind / 2) ~= 2 then
+    fatal('dialog asks %q, only a password can be answered', sub(question, 2))
   end
-  return support.encrypt(pem, xor(self.password .. '\0', self.scramble))
+  return self.password .. '\0'
+end
+
+-- The largest iteration factor of parsec: PBKDF2 of 1024 << factor rounds
+-- must fit into the timeout, as the client library of MariaDB estimates it
+function Connection:factor()
+  local rounds = 262144 / 225 * self.timeout * 1000
+  return math.min(20, math.max(0, math.floor(math.log(rounds / 1024) / math.log(2))))
 end
 
 -- First answer of an authentication plugin to the scramble
@@ -413,6 +435,20 @@ function Connection:respond()
     end
     return '\1' -- asks for the public key
   end
+  -- MariaDB: Ed25519 over the nonce with SHA-512 of the password as the key
+  if plugin == 'client_ed25519' then
+    return support(plugin, 'Ed25519').ed25519(password, self.challenge)
+  end
+  -- MariaDB 11.6 and later: the salt is asked with an empty packet first
+  if plugin == 'parsec' then
+    return ''
+  end
+  if plugin == 'mysql_clear_password' then
+    return password .. '\0'
+  end
+  if plugin == 'dialog' then
+    return self:answer(self.challenge)
+  end
   fatal('authentication plugin %s is not supported', plugin)
 end
 
@@ -435,6 +471,25 @@ function Connection:more(data)
   end
   if self.plugin == 'caching_sha2_password' or self.plugin == 'sha256_password' then
     self:write_packet(self:encrypt(data)) -- the public key in PEM
+    return
+  end
+  -- parsec: 'P', the iteration factor and 18 bytes of salt; the answer is a
+  -- scramble of the client and the signature of both scrambles
+  if self.plugin == 'parsec' then
+    if #data ~= 20 or sub(data, 1, 1) ~= 'P' then
+      fatal('parsec: unexpected parameters of %d bytes', #data)
+    end
+    local factor = byte(data, 2)
+    if factor > self:factor() then
+      fatal('parsec: the iteration factor %d does not fit into the timeout of %d s', factor, self.timeout)
+    end
+    local scramble = digest.urandom(32)
+    self:write_packet(scramble .. support(self.plugin, 'Ed25519').parsec(self.password, sub(data, 3), factor,
+      self.challenge .. scramble))
+    return
+  end
+  if self.plugin == 'dialog' then
+    self:write_packet(self:answer(data))
     return
   end
   fatal('unexpected authentication data for %s', self.plugin)
@@ -473,6 +528,7 @@ function Connection:handshake(user, database)
     end
   end
   self.scramble     = sub(scramble, 1, 20)
+  self.challenge    = self.scramble
   self.plugin       = plugin or 'mysql_native_password'
   self.capabilities = capabilities
 
@@ -536,9 +592,10 @@ function Connection:handshake(user, database)
       error(server_error(packet), 0)
     end
     if first == 0xfe then -- AuthSwitchRequest
-      data        = reader(packet, 2)
-      self.plugin = data:cstring()
-      scramble    = data:rest()
+      data           = reader(packet, 2)
+      self.plugin    = data:cstring()
+      scramble       = data:rest()
+      self.challenge = scramble -- as it is: the nonce of Ed25519 may end with a zero byte
       if byte(scramble, #scramble) == 0 then
         scramble = sub(scramble, 1, -2)
       end
@@ -660,7 +717,8 @@ local function connect(options)
     password   = options.password or '',
     tls        = options.tls or nil,
     public_key = options.public_key,
-    compress   = options.compress
+    compress   = options.compress,
+    timeout    = options.timeout or 30
   }, Connection)
   if connection.tls == true then
     connection.tls = { verify = 'none' }

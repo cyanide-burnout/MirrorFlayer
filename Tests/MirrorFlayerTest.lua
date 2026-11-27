@@ -27,6 +27,11 @@ local SERVER = os.getenv('SERVER') or 'mariadb'
 local TLS    = os.getenv('TLS') or 'off'
 local COMPRESS = os.getenv('COMPRESS') ~= '0'
 
+-- Users of the authentication plugins of MariaDB made by Tests/DockerTest.sh
+local AUTH    = os.getenv('AUTH') or ''
+local PLUGINS = { ed25519 = 'client_ed25519', parsec = 'parsec',
+  pam = os.getenv('CLEARTEXT') == '1' and 'mysql_clear_password' or 'dialog' }
+
 -- MariaDB alone or a node of Galera
 local MARIADB = SERVER ~= 'mysql'
 
@@ -406,9 +411,30 @@ local function stored_position(replica, key, target)
   ok(true, 'stored position %s', target)
 end
 
+-- Each user of an authentication plugin logs in with the password, and not
+-- with a wrong one
+local function authentication()
+  local function login(name, password)
+    return pcall(protocol.connect, { host = HOST, port = 3306, user = 'auth_' .. name, password = password,
+      timeout = 30, tls = TLS ~= 'off' and { verify = 'none' } or nil, compress = COMPRESS })
+  end
+  for name in string.gmatch(AUTH, '[^,]+') do
+    local status, connection = login(name, 'secret')
+    local user = status and connection:value('SELECT CURRENT_USER()')
+    ok(status and connection.plugin == PLUGINS[name] and string.find(tostring(user), 'auth_' .. name, 1, true) == 1,
+      'authentication %s: %s, %s', name, status and connection.plugin or tostring(connection), tostring(user))
+    if status then
+      connection:close()
+    end
+    status = login(name, 'wrong')
+    ok(not status, 'authentication %s: a wrong password is refused', name)
+  end
+end
+
 -- Phases ---------------------------------------------------------------------
 
 local function load()
+  authentication()
   setup_server()
   setup_spaces()
   local replica = replicator()

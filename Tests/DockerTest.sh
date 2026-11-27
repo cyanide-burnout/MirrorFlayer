@@ -4,7 +4,7 @@
 # Tests/PostgreSQLTest.lua in phases.
 #
 #   SERVER=mariadb|galera|mysql|postgresql
-#                          source (images mariadb:11.4, the same as a node of
+#                          source (images mariadb:11.8, the same as a node of
 #                          Galera, mysql:8.4, postgres:17; SERVER_IMAGE overrides)
 #   THREAD=1               the replicators run their source side in an application
 #                          thread (needs TARANTOOL_IMAGE of Tarantool 3.9 or later)
@@ -12,6 +12,12 @@
 #                          TLS verified against the CA of the server
 #   COMPRESS=0             no compressed protocol of MySQL and MariaDB (on by default)
 #   BINLOG_COMPRESS=1      MariaDB compresses its binlog events (log_bin_compress)
+#   CLEARTEXT=1            the PAM user of MariaDB logs in with mysql_clear_password
+#                          instead of dialog
+#
+# MariaDB gets users of the authentication plugins ed25519, parsec (11.6 and
+# later) and pam (pam_unix with a system user of the same name), password
+# secret; the test logs in with each of them (AUTH)
 #
 # Support.so is built in a container of the Tarantool image; Source/ is mounted
 # where make install puts the Lua modules and Support.so. Containers are named
@@ -27,6 +33,8 @@ SERVER=${SERVER:-mariadb}
 TLS=${TLS:-off}
 COMPRESS=${COMPRESS:-1}
 BINLOG_COMPRESS=${BINLOG_COMPRESS:-0}
+CLEARTEXT=${CLEARTEXT:-0}
+AUTH=
 THREAD=${THREAD:-0}
 TARANTOOL_IMAGE=${TARANTOOL_IMAGE:-tarantool/tarantool:3}
 NETWORK=mirrorflayer-net
@@ -40,21 +48,27 @@ if [ "$BINLOG_COMPRESS" = 1 ]; then
   COMPRESSION="--log-bin-compress=ON --log-bin-compress-min-len=10"
 fi
 
+# PAM of MariaDB: dialog, or mysql_clear_password with CLEARTEXT=1
+PAM="--plugin-load-add=auth_pam --pam-use-cleartext-plugin=OFF"
+if [ "$CLEARTEXT" = 1 ]; then
+  PAM="--plugin-load-add=auth_pam --pam-use-cleartext-plugin=ON"
+fi
+
 case "$SERVER" in
   mariadb)
-    SERVER_IMAGE=${SERVER_IMAGE:-mariadb:11.4}
+    SERVER_IMAGE=${SERVER_IMAGE:-mariadb:11.8}
     CLIENT=mariadb
     TEST=Tests/MirrorFlayerTest.lua
     set -- -e MARIADB_ROOT_PASSWORD=root "$SERVER_IMAGE" \
-      --server-id=1 --log-bin=mysql-bin --binlog-format=ROW --binlog-row-image=FULL --binlog-checksum=CRC32 $COMPRESSION
+      --server-id=1 --log-bin=mysql-bin --binlog-format=ROW --binlog-row-image=FULL --binlog-checksum=CRC32 $COMPRESSION $PAM
     ;;
   galera)
-    SERVER_IMAGE=${SERVER_IMAGE:-mariadb:11.4}
+    SERVER_IMAGE=${SERVER_IMAGE:-mariadb:11.8}
     CLIENT=mariadb
     TEST=Tests/MirrorFlayerTest.lua
     # A cluster of one node, bootstrapped by itself
     set -- -e MARIADB_ROOT_PASSWORD=root "$SERVER_IMAGE" \
-      --server-id=1 --log-bin=mysql-bin --binlog-format=ROW --binlog-row-image=FULL --binlog-checksum=CRC32 $COMPRESSION \
+      --server-id=1 --log-bin=mysql-bin --binlog-format=ROW --binlog-row-image=FULL --binlog-checksum=CRC32 $COMPRESSION $PAM \
       --log-slave-updates --innodb-autoinc-lock-mode=2 --wsrep-on=ON --wsrep-provider=/usr/lib/galera/libgalera_smm.so \
       --wsrep-cluster-address=gcomm:// --wsrep-cluster-name=mirrorflayer
     ;;
@@ -132,6 +146,19 @@ else
   if [ "$BINLOG_COMPRESS" = 1 ]; then
     sql "SELECT @@log_bin_compress, @@log_bin_compress_min_len" 2>/dev/null
   fi
+  if [ "$CLIENT" = mariadb ]; then
+    docker exec "$DATABASE" sh -c 'useradd -M auth_pam && echo auth_pam:secret | chpasswd &&
+      printf "auth required pam_unix.so\naccount required pam_unix.so\n" > /etc/pam.d/mariadb'
+    sql "INSTALL SONAME 'auth_ed25519'" 2>/dev/null
+    sql "CREATE USER auth_ed25519 IDENTIFIED VIA ed25519 USING PASSWORD('secret')" 2>/dev/null
+    sql "CREATE USER auth_pam IDENTIFIED VIA pam USING 'mariadb'" 2>/dev/null
+    AUTH=ed25519,pam
+    if sql "INSTALL SONAME 'auth_parsec'" 2>/dev/null; then
+      sql "CREATE USER auth_parsec IDENTIFIED VIA parsec USING PASSWORD('secret')" 2>/dev/null
+      AUTH=$AUTH,parsec
+    fi
+    echo "users of the authentication plugins: $AUTH"
+  fi
   if [ "$TLS" = ca ]; then
     docker exec "$DATABASE" cat /var/lib/mysql/ca.pem > "$WORK/certs/ca.pem"
   fi
@@ -141,7 +168,7 @@ phase() {
   echo "=== phase $1 ($SERVER, TLS $TLS, thread $THREAD, compress $COMPRESS, binlog compress $BINLOG_COMPRESS)"
   docker run --rm --name "$TARANTOOL" --network "$NETWORK" \
     --user "$(id -u):$(id -g)" -e HOME=/tmp -e MIRRORFLAYER_DATA=/data \
-    -e SERVER="$SERVER" -e TLS="$TLS" -e THREAD="$THREAD" -e COMPRESS="$COMPRESS" -e SERVER_HOST="$DATABASE" \
+    -e SERVER="$SERVER" -e TLS="$TLS" -e THREAD="$THREAD" -e COMPRESS="$COMPRESS" -e AUTH="$AUTH" -e CLEARTEXT="$CLEARTEXT" -e SERVER_HOST="$DATABASE" \
     -v "$SOURCE:/src:ro" -v "$WORK/$2:/data" -v "$WORK/certs:/certs:ro" -w /src \
     -v "$SOURCE/Source:/usr/share/tarantool/MirrorFlayer:ro" \
     -v "$SOURCE/Source:/usr/lib/x86_64-linux-gnu/tarantool/MirrorFlayer:ro" \
