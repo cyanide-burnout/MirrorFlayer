@@ -8,7 +8,8 @@
 -- threads.eval() runs code in every thread of a group: each thread starts
 -- the Runner only when it is the one asked for (thread_id). Values cross as
 -- MsgPack; a value an update did not send (Column.UNCHANGED) crosses as the
--- list of its positions in the row.
+-- list of its positions in the row, a patch (Column.patch) as the list of its
+-- positions with its module, diffs and mode.
 
 local threads = require('threads')
 
@@ -55,6 +56,23 @@ local function call(name, method, ...)
   raise(result[2])
 end
 
+-- Patches of a row with their positions; they cross as NULL
+local function patches(row)
+  if row == nil then
+    return NULL
+  end
+  local list
+  for index = 1, #row do
+    local value = row[index]
+    if convert.patched(value) then
+      list = list or {}
+      table.insert(list, { index, value.module, value.diffs, value.mode })
+      row[index] = NULL
+    end
+  end
+  return list or NULL
+end
+
 -- Positions of the values an update did not send; they cross as NULL
 local function marks(row)
   if row == nil then
@@ -77,6 +95,7 @@ local function remote(name)
       for _, change in ipairs(changes) do
         local old, new = change[3], change[4]
         -- old and new may be one table (an update that kept the key)
+        change[7] = patches(new)
         change[6] = marks(new)
         change[5] = rawequal(old, new) and change[6] or marks(old)
         change[3] = old or NULL
@@ -146,6 +165,11 @@ local function restore(change)
       for _, index in ipairs(change[marked]) do
         row[index] = UNCHANGED
       end
+    end
+  end
+  if type(change[7]) == 'table' and type(change[4]) == 'table' then
+    for _, item in ipairs(change[7]) do
+      change[4][item[1]] = convert.patch(item[2], item[3], item[4])
     end
   end
 end

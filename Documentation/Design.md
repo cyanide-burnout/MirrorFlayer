@@ -244,6 +244,30 @@ compression, 0 zstd or 255 none, 3 the size before compression), then the
 payload: the events of the transaction one after another, without checksums
 of their own.
 
+### Row images and partial JSON
+
+A row image that is not `FULL` (`MINIMAL`, `NOBLOB`, `FULL_NODUP` of MariaDB)
+lacks columns: they come as `Column.UNCHANGED`, as the TOAST values of
+PostgreSQL, and the target space keeps what it has (`Store` takes them from
+the stored tuple, `NULL` for a function target or a new row). An insert of
+`MINIMAL` lacks the columns the statement did not set: they become `NULL`,
+the server would write their defaults.
+
+`PARTIAL_UPDATE_ROWS` of MySQL (`binlog_row_value_options=PARTIAL_JSON`):
+between the before and the after image a shared image, the value options and
+with partial JSON a bit for every JSON column of the table. A JSON column with
+its bit set comes as diffs: a 4-byte length, then for each an operation byte
+(0 replace, 1 insert, 2 remove), the path as text (`$.a[1]`, `$."a b"`,
+`[last]`) and, but for remove, the value in binary JSON, lengths as
+length-encoded integers. `MirrorFlayer.MySQL.JSON` keeps JSON as a tree with
+the types of its numbers, applies the diffs to the old document of the before
+image or, when the image lacks it, to the stored one (a `Column.patch` that
+`Store` resolves; it crosses from a thread as data), and renders the tree in
+the json mode: Lua values, or the text MySQL prints, object keys by length and
+then by bytes as its binary form keeps them, the text of doubles and decimals
+as it was. Opaque values inside JSON (DECIMAL, DATE, TIME, DATETIME,
+TIMESTAMP) are read as MySQL prints them, others as `base64:typeN:...`.
+
 ### Authentication of MariaDB
 
 * `client_ed25519`: the server sends a nonce of 32 bytes in the switch

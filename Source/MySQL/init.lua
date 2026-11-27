@@ -36,7 +36,6 @@ local LOST_POSITION = 1236
 local UNSUPPORTED = {
   [E.ANONYMOUS_GTID] = 'transaction without GTID: the source needs gtid_mode=ON',
   [E.GTID_TAGGED] = 'tagged GTIDs are not supported',
-  [E.PARTIAL_UPDATE_ROWS] = 'partial JSON updates are not supported, binlog_row_value_options must be empty',
   [E.XA_PREPARE] = 'XA transactions are not supported'
 }
 

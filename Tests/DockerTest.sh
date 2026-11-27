@@ -13,6 +13,10 @@
 #   COMPRESS=0             no compressed protocol of MySQL and MariaDB (on by default)
 #   BINLOG_COMPRESS=1      MariaDB compresses its binlog events (log_bin_compress),
 #                          MySQL its transactions (binlog_transaction_compression)
+#   ROW_IMAGE=FULL|MINIMAL|NOBLOB|FULL_NODUP
+#                          binlog_row_image of the source (FULL by default,
+#                          FULL_NODUP is MariaDB only)
+#   PARTIAL_JSON=1         MySQL logs JSON updates as diffs (binlog_row_value_options)
 #   CLEARTEXT=1            the PAM user of MariaDB logs in with mysql_clear_password
 #                          instead of dialog
 #
@@ -35,6 +39,8 @@ TLS=${TLS:-off}
 COMPRESS=${COMPRESS:-1}
 BINLOG_COMPRESS=${BINLOG_COMPRESS:-0}
 CLEARTEXT=${CLEARTEXT:-0}
+ROW_IMAGE=${ROW_IMAGE:-FULL}
+PARTIAL_JSON=${PARTIAL_JSON:-0}
 AUTH=
 THREAD=${THREAD:-0}
 TARANTOOL_IMAGE=${TARANTOOL_IMAGE:-tarantool/tarantool:3}
@@ -61,7 +67,7 @@ case "$SERVER" in
     CLIENT=mariadb
     TEST=Tests/MirrorFlayerTest.lua
     set -- -e MARIADB_ROOT_PASSWORD=root "$SERVER_IMAGE" \
-      --server-id=1 --log-bin=mysql-bin --binlog-format=ROW --binlog-row-image=FULL --binlog-checksum=CRC32 $COMPRESSION $PAM
+      --server-id=1 --log-bin=mysql-bin --binlog-format=ROW --binlog-row-image=$ROW_IMAGE --binlog-checksum=CRC32 $COMPRESSION $PAM
     ;;
   galera)
     SERVER_IMAGE=${SERVER_IMAGE:-mariadb:11.8}
@@ -69,7 +75,7 @@ case "$SERVER" in
     TEST=Tests/MirrorFlayerTest.lua
     # A cluster of one node, bootstrapped by itself
     set -- -e MARIADB_ROOT_PASSWORD=root "$SERVER_IMAGE" \
-      --server-id=1 --log-bin=mysql-bin --binlog-format=ROW --binlog-row-image=FULL --binlog-checksum=CRC32 $COMPRESSION $PAM \
+      --server-id=1 --log-bin=mysql-bin --binlog-format=ROW --binlog-row-image=$ROW_IMAGE --binlog-checksum=CRC32 $COMPRESSION $PAM \
       --log-slave-updates --innodb-autoinc-lock-mode=2 --wsrep-on=ON --wsrep-provider=/usr/lib/galera/libgalera_smm.so \
       --wsrep-cluster-address=gcomm:// --wsrep-cluster-name=mirrorflayer
     ;;
@@ -80,8 +86,11 @@ case "$SERVER" in
     if [ "$BINLOG_COMPRESS" = 1 ]; then
       COMPRESSION=--binlog-transaction-compression=ON
     fi
+    if [ "$PARTIAL_JSON" = 1 ]; then
+      COMPRESSION="$COMPRESSION --binlog-row-value-options=PARTIAL_JSON"
+    fi
     set -- -e MYSQL_ROOT_PASSWORD=root "$SERVER_IMAGE" \
-      --server-id=1 --gtid-mode=ON --enforce-gtid-consistency=ON --binlog-row-image=FULL --binlog-checksum=CRC32 \
+      --server-id=1 --gtid-mode=ON --enforce-gtid-consistency=ON --binlog-row-image=$ROW_IMAGE --binlog-checksum=CRC32 \
       $COMPRESSION
     ;;
   postgresql)
@@ -172,7 +181,7 @@ else
 fi
 
 phase() {
-  echo "=== phase $1 ($SERVER, TLS $TLS, thread $THREAD, compress $COMPRESS, binlog compress $BINLOG_COMPRESS)"
+  echo "=== phase $1 ($SERVER, TLS $TLS, thread $THREAD, compress $COMPRESS, binlog compress $BINLOG_COMPRESS, row image $ROW_IMAGE, partial JSON $PARTIAL_JSON)"
   docker run --rm --name "$TARANTOOL" --network "$NETWORK" \
     --user "$(id -u):$(id -g)" -e HOME=/tmp -e MIRRORFLAYER_DATA=/data \
     -e SERVER="$SERVER" -e TLS="$TLS" -e THREAD="$THREAD" -e COMPRESS="$COMPRESS" -e AUTH="$AUTH" -e CLEARTEXT="$CLEARTEXT" -e SERVER_HOST="$DATABASE" \
@@ -188,4 +197,4 @@ phase load data
 phase resume data
 phase purge data
 phase late late
-echo "all phases passed ($SERVER_IMAGE, TLS $TLS, thread $THREAD, compress $COMPRESS, binlog compress $BINLOG_COMPRESS)"
+echo "all phases passed ($SERVER_IMAGE, TLS $TLS, thread $THREAD, compress $COMPRESS, binlog compress $BINLOG_COMPRESS, row image $ROW_IMAGE, partial JSON $PARTIAL_JSON)"

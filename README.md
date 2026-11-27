@@ -25,10 +25,12 @@ Internals and OpenSSL findings are in
 
 Requires Tarantool 3.x and
 
-* MySQL or MariaDB with `log_bin`, `binlog_format=ROW`,
-  `binlog_row_image=FULL` and GTIDs: always there in MariaDB, `gtid_mode=ON`
-  in MySQL. MySQL must not log partial JSON updates
-  (`binlog_row_value_options` empty, the default);
+* MySQL or MariaDB with `log_bin`, `binlog_format=ROW` and GTIDs: always
+  there in MariaDB, `gtid_mode=ON` in MySQL. Any `binlog_row_image` (`FULL`,
+  `MINIMAL`, `NOBLOB`, `FULL_NODUP` of MariaDB) and the partial JSON updates
+  of MySQL (`binlog_row_value_options=PARTIAL_JSON`) are read: a column a row
+  image lacks keeps the value the target space has, a JSON diff is applied to
+  the old document; a function target gets `NULL` for what it cannot know;
 * or PostgreSQL 12 or later with `wal_level=logical`, free replication slots
   and WAL senders, and a publication of the mapped tables.
 

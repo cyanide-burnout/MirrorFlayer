@@ -110,17 +110,25 @@ local function same(left, right)
 end
 
 -- Fields a change did not send take the values of the stored tuple, or
--- NULL when there is none (function targets get NULL)
+-- NULL when there is none (function targets get NULL); a patch is applied to
+-- the stored value
 function Target:complete(after, before)
   local stored
   for index = 1, #after do
-    if rawequal(after[index], UNCHANGED) then
+    local field = after[index]
+    if rawequal(field, UNCHANGED) or convert.patched(field) then
       if stored == nil and self.space ~= nil then
         stored = self.space:get(self:keyof(before or after)) or false
       end
-      local value = stored and stored[index]
+      local value
+      if stored then
+        value = stored[index]
+      end
       if value == nil then
         value = NULL
+      end
+      if convert.patched(field) then
+        value = require(field.module).patch(value, field.diffs, field.mode)
       end
       after[index] = value
     end

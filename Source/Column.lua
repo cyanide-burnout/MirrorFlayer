@@ -27,8 +27,22 @@ local sub = string.sub
 local NULL = box.NULL
 
 -- A value a source did not send because the change did not touch it (TOAST
--- of PostgreSQL): the target keeps what it has. Compared with rawequal.
+-- of PostgreSQL, a row image of MySQL that is not FULL): the target keeps what
+-- it has. Compared with rawequal.
 local UNCHANGED = setmetatable({}, { __tostring = function () return 'UNCHANGED' end })
+
+-- A value a source sent as changes of the stored one (a partial JSON update of
+-- MySQL whose row image has no old value): module.patch(stored, diffs, mode)
+-- makes the new value of the stored one
+local PATCH = { __tostring = function () return 'PATCH' end }
+
+local function patch(module, diffs, mode)
+  return setmetatable({ module = module, diffs = diffs, mode = mode }, PATCH)
+end
+
+local function patched(value)
+  return type(value) == 'table' and getmetatable(value) == PATCH
+end
 
 local status, varbinary = pcall(require, 'varbinary')
 local binary
@@ -160,6 +174,8 @@ end
 return {
   NULL       = NULL,
   UNCHANGED  = UNCHANGED,
+  patch      = patch,
+  patched    = patched,
   binary     = binary,
   integer    = integer,
   float      = float,

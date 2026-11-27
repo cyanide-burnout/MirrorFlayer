@@ -1,11 +1,15 @@
 -- Binlog events: header, CRC32, FORMAT_DESCRIPTION, ROTATE, QUERY, XID,
--- TABLE_MAP and WRITE/UPDATE/DELETE_ROWS v1/v2, compressed ones of MariaDB too
+-- TABLE_MAP and WRITE/UPDATE/DELETE_ROWS v1/v2, compressed ones of MariaDB,
+-- PARTIAL_UPDATE_ROWS of MySQL; row images FULL, MINIMAL, NOBLOB or
+-- FULL_NODUP: a column an image lacks is Column.UNCHANGED
 
 local ffi = require('ffi')
 local bit = require('bit')
 
 local protocol = require('MirrorFlayer.MySQL.Protocol')
 local column   = require('MirrorFlayer.MySQL.Column')
+local JSON     = require('MirrorFlayer.MySQL.JSON')
+local convert  = require('MirrorFlayer.Column')
 
 local band, bxor, bnot, rshift, tobit = bit.band, bit.bxor, bit.bnot, bit.rshift, bit.tobit
 
@@ -35,8 +39,14 @@ local ROWS = {
   [E.WRITE_ROWS_COMPRESSED_V1] = { 'insert', 1, true }, [E.UPDATE_ROWS_COMPRESSED_V1] = { 'update', 1, true },
   [E.DELETE_ROWS_COMPRESSED_V1] = { 'delete', 1, true },
   [E.WRITE_ROWS_COMPRESSED] = { 'insert', 2, true }, [E.UPDATE_ROWS_COMPRESSED] = { 'update', 2, true },
-  [E.DELETE_ROWS_COMPRESSED] = { 'delete', 2, true }
+  [E.DELETE_ROWS_COMPRESSED] = { 'delete', 2, true },
+  -- MySQL with binlog_row_value_options=PARTIAL_JSON: JSON columns may come
+  -- as changes of the old value
+  [E.PARTIAL_UPDATE_ROWS] = { 'update', 2, false, true }
 }
+
+local UNCHANGED = convert.UNCHANGED
+local TYPE_JSON = 245
 
 local HEADER = 19
 
@@ -237,15 +247,20 @@ local function rows_table(header)
   return id
 end
 
-local function full(present, what)
-  for index = 1, #present do
-    if not present[index] then
-      protocol.fatal('%s row image lacks column %d: binlog_row_image must be FULL', what, index)
-    end
+-- A partial JSON value: the diffs applied to the old value when the before
+-- image has it, a patch of the stored value otherwise
+local function partial(data, description, old)
+  local diffs = JSON.diffs(data:bytes(data:u32()))
+  -- box.NULL == nil as well
+  if old ~= nil and not rawequal(old, UNCHANGED) then
+    return JSON.patch(old, diffs, description.json)
   end
+  return convert.patch('MirrorFlayer.MySQL.JSON', diffs, description.json)
 end
 
-local function image(data, map, columns, present)
+-- A row image: present tells the columns it has, the others are UNCHANGED;
+-- partials are the JSON columns sent as diffs, base the before image
+local function image(data, map, columns, present, partials, base)
   local count = 0
   for index = 1, #present do
     if present[index] then
@@ -260,14 +275,38 @@ local function image(data, map, columns, present)
       slot = slot + 1
       if nulls[slot] then
         row[index] = NULL
+      elseif partials ~= nil and partials[index] then
+        row[index] = partial(data, columns[index], base[index])
       else
         row[index] = column.decode(data, columns[index], map.types[index], map.meta[index])
       end
     else
-      row[index] = NULL
+      row[index] = UNCHANGED
     end
   end
   return row
+end
+
+-- The shared image of PARTIAL_UPDATE_ROWS: value options and, with partial
+-- JSON updates, a bit for every JSON column of the table; the JSON columns
+-- sent as diffs, by index
+local function shared(data, map)
+  if band(data:lenenc(), 1) == 0 then
+    return nil
+  end
+  local indexes = {}
+  for index, kind in ipairs(map.types) do
+    if kind == TYPE_JSON then
+      table.insert(indexes, index)
+    end
+  end
+  local bits, result = bitmap(data, #indexes), {}
+  for position, index in ipairs(indexes) do
+    if bits[position] then
+      result[index] = true
+    end
+  end
+  return result
 end
 
 -- WRITE/UPDATE/DELETE_ROWS v1/v2.
@@ -276,7 +315,7 @@ end
 local function rows(header, map, columns)
   local kind = ROWS[header.type]
   local data = header.data
-  local operation, version, compressed = kind[1], kind[2], kind[3]
+  local operation, version, compressed, partials = kind[1], kind[2], kind[3], kind[4]
   data:skip(6 + 2) -- table id, flags
   if version == 2 then
     data:skip(data:u16() - 2)
@@ -290,10 +329,6 @@ local function rows(header, map, columns)
   if operation == 'update' then
     after = bitmap(data, count)
   end
-  full(before, operation == 'insert' and 'after' or 'before')
-  if operation == 'update' then
-    full(after, 'after')
-  end
   if compressed then data = inflate(data) end
   local result = {}
   while data:left() > 0 do
@@ -303,7 +338,7 @@ local function rows(header, map, columns)
     elseif operation == 'delete' then
       table.insert(result, { first, nil })
     else
-      table.insert(result, { first, image(data, map, columns, after) })
+      table.insert(result, { first, image(data, map, columns, after, partials and shared(data, map), first) })
     end
   end
   return operation, result

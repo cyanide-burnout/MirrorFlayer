@@ -543,6 +543,48 @@ local function load()
     caught_up(item.replica)
     check_types(1, 'load', item.space, item.datetime, item.json, item.uuid)
     check_types(5, 'stream', item.space, item.datetime, item.json, item.uuid)
+  end
+
+  -- JSON updates of MySQL, as diffs with PARTIAL_JSON: every mode ends with
+  -- the document the server has
+  if not MARIADB then
+    exec([[UPDATE Registry.Types SET Js = JSON_SET(Js, '$.a', 'z', '$.d', 7, '$.b[0]', 2.5) WHERE ID = 5]],
+      [[UPDATE Registry.Types SET Js = JSON_REMOVE(Js, '$.b[1]', '$.c') WHERE ID = 5]],
+      [[UPDATE Registry.Types SET Js = JSON_REPLACE(Js, '$.d', JSON_OBJECT('k', 'v', 'long key', JSON_ARRAY(1, 2)))
+        WHERE ID = 5]],
+      [[UPDATE Registry.Types SET Js = JSON_SET(Js, '$."long key"', NULL, '$.b[last]', -1) WHERE ID = 5]],
+      -- DECIMAL, DATETIME, DATE and TIME are opaque values inside JSON
+      [[UPDATE Registry.Types SET Js = JSON_SET(Js, '$.e', CAST('12.50' AS DECIMAL(6, 2)),
+        '$.f', CAST('2026-01-02 03:04:05.678' AS DATETIME(3)), '$.g', CAST('2026-01-02' AS DATE),
+        '$.h', CAST('-838:59:58.5' AS TIME(1))) WHERE ID = 5]])
+    local text = sql:value('SELECT Js FROM Registry.Types WHERE ID = 5')
+    local function same(left, right)
+      if type(left) ~= 'table' or type(right) ~= 'table' then
+        return left == right
+      end
+      for key, value in pairs(left) do
+        if not same(value, right[key]) then return false end
+      end
+      for key in pairs(right) do
+        -- box.NULL == nil: a key with JSON null is there all the same
+        if rawequal(left[key], nil) then return false end
+      end
+      return true
+    end
+    caught_up(replica)
+    ok(same(box.space.Types:get(5).Js, require('json').decode(text)), 'partial JSON, map: %s',
+      require('json').encode(box.space.Types:get(5).Js))
+    for _, item in ipairs(MODES) do
+      caught_up(item.replica)
+      local value = box.space[item.space]:get(5).Js
+      if item.json == 'string' then
+        ok(value == text, 'partial JSON, %s: %s vs %s', item.space, tostring(value), text)
+      else
+        ok(same(value, require('json').decode(text)), 'partial JSON, %s: %s', item.space, require('json').encode(value))
+      end
+    end
+  end
+  for _, item in ipairs(MODES) do
     item.replica:stop()
   end
 
