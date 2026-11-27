@@ -16,7 +16,9 @@ MariaDB, MySQL and PostgreSQL, with or without TLS; `mysql_native_password`,
 `caching_sha2_password`, `sha256_password`, `client_ed25519`, `parsec`,
 `mysql_clear_password` and `dialog` (PAM of MariaDB, the password answers
 its password questions), `SCRAM-SHA-256`, over TLS `SCRAM-SHA-256-PLUS`
-(the password bound to the TLS session), and `md5`. With
+(the password bound to the TLS session), `md5` and GSSAPI (Kerberos: the
+process logs in as its principal, from the credential cache or the client
+keytab of `KRB5_CLIENT_KTNAME`, to `postgres@host`). With
 MySQL and MariaDB the traffic is compressed (the compressed protocol, zstd
 where MySQL has it, zlib otherwise), and compressed binlogs are read: events
 of MariaDB (`log_bin_compress`) and transactions of MySQL
@@ -269,9 +271,9 @@ file Lua looks for in a package directory. `Source/Support.c` is
 `MirrorFlayer.Support` (TLS, RSA and inflate), installed as
 `$(PREFIX)/lib/<triplet>/tarantool/MirrorFlayer/Support.so`; it needs the
 headers of `tarantool-dev`, `libssl-dev`, `zlib1g-dev`, `libzstd-dev` and
-`libsodium-dev` and links the system OpenSSL, zlib, zstd and libsodium: a host
-needs their libraries (`libsodium23` is not in every image), or the module does
-not load at all. Up to 2.2 it was `MirrorFlayer.TLS` (`TLS.so`).
+`libsodium-dev` and `libkrb5-dev` and links the system OpenSSL, zlib, zstd,
+libsodium and GSSAPI of MIT Kerberos: a host needs their libraries
+(`libsodium23` is not in every image), or the module does not load at all. Up to 2.2 it was `MirrorFlayer.TLS` (`TLS.so`).
 
 ```
 make                                       # Source/Support.so, stripped (STRIP=true keeps it as built)
@@ -312,7 +314,8 @@ MySQL and MariaDB connections are compressed, `COMPRESS=0` turns that off;
 transactions. MariaDB gets
 users of `ed25519`, `parsec` and `pam` (over `pam_unix`), the test logs in
 with each; `CLEARTEXT=1` makes PAM use `mysql_clear_password` instead of
-`dialog`.
+`dialog`. `GSS=1` with PostgreSQL starts a KDC of its own and logs in with
+Kerberos.
 
 1. `load` — tables with data exist before the start: full load, values of all
    types, then INSERT/UPDATE/DELETE over the stream, a key change, a

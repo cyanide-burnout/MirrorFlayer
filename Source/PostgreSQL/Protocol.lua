@@ -19,12 +19,14 @@ local NULL = box.NULL
 local PROTOCOL    = 196608   -- 3.0
 local SSL_REQUEST = 80877103
 
-local AUTH_OK         = 0
-local AUTH_CLEARTEXT  = 3
-local AUTH_MD5        = 5
-local AUTH_SASL       = 10
-local AUTH_SASL_NEXT  = 11
-local AUTH_SASL_FINAL = 12
+local AUTH_OK           = 0
+local AUTH_CLEARTEXT    = 3
+local AUTH_MD5          = 5
+local AUTH_GSS          = 7
+local AUTH_GSS_CONTINUE = 8
+local AUTH_SASL         = 10
+local AUTH_SASL_NEXT    = 11
+local AUTH_SASL_FINAL   = 12
 
 -- Reader over a string, big-endian -----------------------------------------------
 
@@ -275,6 +277,24 @@ function Connection:scram(mechanisms)
   end
 end
 
+-- GSSAPI (Kerberos): the process logs in as its principal (the credential
+-- cache, or the client keytab of KRB5_CLIENT_KTNAME) to the service principal
+-- postgres@host; tokens go both ways until the exchange is complete
+function Connection:gss(token)
+  if self.exchange == nil then
+    local status, support = pcall(require, 'MirrorFlayer.Support')
+    if not status then
+      fatal('GSSAPI needs MirrorFlayer.Support (Support.so): %s', tostring(support))
+    end
+    self.exchange  = support.gss('postgres', self.options.host)
+    self.mechanism = 'GSS'
+  end
+  local answer = self.exchange:step(token)
+  if #answer > 0 then
+    self:password(answer)
+  end
+end
+
 function Connection:authenticate()
   while true do
     local kind, payload = self:receive()
@@ -294,6 +314,8 @@ function Connection:authenticate()
         self:password('md5' .. digest.md5_hex(inner .. salt) .. '\0')
       elseif code == AUTH_SASL then
         self:scram(data:rest())
+      elseif code == AUTH_GSS or code == AUTH_GSS_CONTINUE then
+        self:gss(code == AUTH_GSS_CONTINUE and data:rest() or nil)
       else
         fatal('authentication method %d is not supported', code)
       end

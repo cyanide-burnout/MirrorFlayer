@@ -22,6 +22,8 @@
 //   Support.ed25519(password, message) -- the signature of client_ed25519 of MariaDB
 //   Support.parsec(password, salt, factor, message)
 //                                      -- the signature of parsec of MariaDB
+//   local exchange = Support.gss(service, host)
+//   exchange:step([token])             -- the next token for the server, true when complete (GSSAPI, Kerberos)
 //
 // verify is 'none' (encryption only), 'ca' (the chain against ca or the system store) or 'identity' (also the host
 // name). Errors are raised with the reason of OpenSSL.
@@ -34,6 +36,7 @@
 #include <zlib.h>
 #include <zstd.h>
 #include <sodium.h>
+#include <gssapi/gssapi.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include <openssl/pem.h>
@@ -46,6 +49,7 @@
 #include <module.h>
 
 #define SESSION  "MirrorFlayer.Support"
+#define EXCHANGE "MirrorFlayer.GSS"
 #define CHUNK    16384
 #define TIMEOUT  30.0
 
@@ -656,6 +660,145 @@ static int SignParsec(lua_State* state)
   return 1;
 }
 
+// GSSAPI (Kerberos of PostgreSQL): the process logs in as its principal, from the credential cache or the client keytab
+// of KRB5_CLIENT_KTNAME. gss_init_sec_context() may ask the KDC for a ticket, so a step runs in a thread of the pool
+// of Tarantool (coio_call) while the fiber waits
+
+struct Exchange
+{
+  gss_ctx_id_t context;
+  gss_name_t target;
+};
+
+struct Step
+{
+  struct Exchange* exchange;
+  gss_buffer_desc input;
+  gss_buffer_desc output;
+  OM_uint32 major;
+  OM_uint32 minor;
+};
+
+static ssize_t RunStep(va_list arguments)
+{
+  struct Step* step;
+
+  step        = va_arg(arguments, struct Step*);
+  step->major = gss_init_sec_context(&step->minor, GSS_C_NO_CREDENTIAL, &step->exchange->context,
+    step->exchange->target, GSS_C_NO_OID, GSS_C_MUTUAL_FLAG, 0, GSS_C_NO_CHANNEL_BINDINGS,
+    (step->input.length > 0) ? &step->input : GSS_C_NO_BUFFER, NULL, &step->output, NULL, NULL);
+
+  return 0;
+}
+
+// Raises the messages of a GSS status and of its mechanism
+static int RaiseStatus(lua_State* state, OM_uint32 major, OM_uint32 minor, const char* action)
+{
+  OM_uint32 status;
+  OM_uint32 context;
+  gss_buffer_desc text;
+  luaL_Buffer buffer;
+
+  luaL_buffinit(state, &buffer);
+  context = 0;
+  gss_display_status(&status, major, GSS_C_GSS_CODE, GSS_C_NO_OID, &context, &text);
+  luaL_addlstring(&buffer, (const char*)text.value, text.length);
+  gss_release_buffer(&status, &text);
+
+  if (minor != 0)
+  {
+    context = 0;
+    gss_display_status(&status, minor, GSS_C_MECH_CODE, GSS_C_NO_OID, &context, &text);
+    luaL_addstring(&buffer, ": ");
+    luaL_addlstring(&buffer, (const char*)text.value, text.length);
+    gss_release_buffer(&status, &text);
+  }
+
+  luaL_pushresult(&buffer);
+  return luaL_error(state, "GSS %s: %s", action, lua_tostring(state, -1));
+}
+
+// Support.gss(service, host): an exchange for the service principal service@host
+
+static int CreateExchange(lua_State* state)
+{
+  const char* service;
+  const char* host;
+  struct Exchange* exchange;
+  gss_buffer_desc name;
+  OM_uint32 major;
+  OM_uint32 minor;
+
+  service = luaL_checkstring(state, 1);
+  host    = luaL_checkstring(state, 2);
+
+  exchange          = (struct Exchange*)lua_newuserdata(state, sizeof(struct Exchange));
+  exchange->context = GSS_C_NO_CONTEXT;
+  exchange->target  = GSS_C_NO_NAME;
+  luaL_getmetatable(state, EXCHANGE);
+  lua_setmetatable(state, -2);
+
+  name.value  = (void*)lua_pushfstring(state, "%s@%s", service, host);
+  name.length = strlen((const char*)name.value);
+  major       = gss_import_name(&minor, &name, GSS_C_NT_HOSTBASED_SERVICE, &exchange->target);
+  lua_pop(state, 1);
+
+  if (GSS_ERROR(major))
+    return RaiseStatus(state, major, minor, "name");
+
+  return 1;
+}
+
+// exchange:step([token]): the token for the server, empty when there is none, and true when the exchange is complete
+
+static int StepExchange(lua_State* state)
+{
+  struct Step step;
+  OM_uint32 minor;
+  size_t size;
+
+  step.exchange       = (struct Exchange*)luaL_checkudata(state, 1, EXCHANGE);
+  step.input.value    = (void*)luaL_optlstring(state, 2, "", &size);
+  step.input.length   = size;
+  step.output.value   = NULL;
+  step.output.length  = 0;
+
+  if (step.exchange->target == GSS_C_NO_NAME)
+    return luaL_error(state, "GSS exchange is closed");
+
+  if (coio_call(RunStep, &step) < 0)
+    return luaL_error(state, "GSS step: the thread pool failed");
+
+  if (GSS_ERROR(step.major))
+  {
+    gss_release_buffer(&minor, &step.output);
+    return RaiseStatus(state, step.major, step.minor, "step");
+  }
+
+  lua_pushlstring(state, (step.output.value != NULL) ? (const char*)step.output.value : "", step.output.length);
+  gss_release_buffer(&minor, &step.output);
+  lua_pushboolean(state, step.major == GSS_S_COMPLETE);
+  return 2;
+}
+
+static int CloseExchange(lua_State* state)
+{
+  struct Exchange* exchange;
+  OM_uint32 minor;
+
+  exchange = (struct Exchange*)luaL_checkudata(state, 1, EXCHANGE);
+
+  if (exchange->context != GSS_C_NO_CONTEXT)
+    gss_delete_sec_context(&minor, &exchange->context, GSS_C_NO_BUFFER);
+
+  if (exchange->target != GSS_C_NO_NAME)
+    gss_release_name(&minor, &exchange->target);
+
+  exchange->context = GSS_C_NO_CONTEXT;
+  exchange->target  = GSS_C_NO_NAME;
+  return 0;
+}
+
 LUA_API int luaopen_MirrorFlayer_Support(lua_State* state)
 {
   static const luaL_Reg methods[] =
@@ -669,6 +812,14 @@ LUA_API int luaopen_MirrorFlayer_Support(lua_State* state)
     { NULL,       NULL         }
   };
 
+  static const luaL_Reg exchanges[] =
+  {
+    { "step",  StepExchange  },
+    { "close", CloseExchange },
+    { "__gc",  CloseExchange },
+    { NULL,    NULL          }
+  };
+
   static const luaL_Reg functions[] =
   {
     { "connect",    ConnectSession    },
@@ -677,6 +828,7 @@ LUA_API int luaopen_MirrorFlayer_Support(lua_State* state)
     { "crc32",      CalculateChecksum },
     { "ed25519",    SignEd25519       },
     { "parsec",     SignParsec        },
+    { "gss",        CreateExchange    },
     { NULL,         NULL              }
   };
 
@@ -686,6 +838,12 @@ LUA_API int luaopen_MirrorFlayer_Support(lua_State* state)
   lua_pushvalue(state, -1);
   lua_setfield(state, -2, "__index");
   luaL_register(state, NULL, methods);
+  lua_pop(state, 1);
+
+  luaL_newmetatable(state, EXCHANGE);
+  lua_pushvalue(state, -1);
+  lua_setfield(state, -2, "__index");
+  luaL_register(state, NULL, exchanges);
   lua_pop(state, 1);
 
   lua_newtable(state);

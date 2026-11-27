@@ -151,6 +151,18 @@ the hash of its signature, SHA-256 for MD5 and SHA-1 (RFC 5929),
 `session:endpoint()` of `Support.so`. The proof then holds only for that TLS
 session. Over TLS without PLUS the header is `y,,`, without TLS `n,,`.
 
+### GSSAPI of PostgreSQL
+
+`AuthenticationGSS` (7) starts an exchange for the service principal
+`postgres@host` with `gss_init_sec_context()` of the system GSSAPI (MIT
+Kerberos, `Support.gss()`): its tokens go to the server as password
+messages, `AuthenticationGSSContinue` (8) brings the answers, until the
+context is complete. The credentials are those of the process: the
+credential cache, or a client keytab named by `KRB5_CLIENT_KTNAME`, from
+which MIT Kerberos takes a ticket itself. A step may ask the KDC, so it runs
+in a thread of the pool of Tarantool (`coio_call`) while the fiber waits.
+GSS encryption (`GSSENCRequest`) is not used: TLS does that part.
+
 ### Streamed transactions of PostgreSQL
 
 PostgreSQL 14 and later get `proto_version '2', streaming 'on'`: a

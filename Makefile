@@ -9,7 +9,7 @@ SSH       ?= ssh
 
 # MirrorFlayer.Support (Source/Support.so) is a C module: TLS over the connected socket, RSA for caching_sha2_password
 # and inflate for the compressed protocol and binlog events. It needs the headers of tarantool-dev, libssl-dev,
-# zlib1g-dev, libzstd-dev and libsodium-dev; SUPPORT=0 leaves it out, then only plain uncompressed connections and mysql_native_password (or
+# zlib1g-dev, libzstd-dev, libsodium-dev and libkrb5-dev; SUPPORT=0 leaves it out, then only plain uncompressed connections and mysql_native_password (or
 # caching_sha2_password from its cache) work
 # Support.so is stripped with <triplet>-strip of $(CC) when there is one (a cross build), with strip otherwise;
 # STRIP=true keeps the debug info
@@ -29,7 +29,7 @@ override CFLAGS += -std=gnu99 -Wall -fPIC $(shell pkg-config --cflags tarantool 
 all: $(LIBRARY)
 
 Source/Support.so: Source/Support.c
-	$(CC) $(CFLAGS) -shared -z noexecstack $< $(LDFLAGS) -lssl -lcrypto -lz -lzstd -lsodium -o $@
+	$(CC) $(CFLAGS) -shared -z noexecstack $< $(LDFLAGS) -lssl -lcrypto -lz -lzstd -lsodium -lgssapi_krb5 -o $@
 	$(STRIP) $@
 
 check:

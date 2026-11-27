@@ -18,6 +18,8 @@
 #                          FULL_NODUP is MariaDB only)
 #   PARTIAL_JSON=1         MySQL logs JSON updates as diffs (binlog_row_value_options)
 #   GTID=0                 MySQL without GTIDs: the position is a binlog file and offset
+#   GSS=1                  PostgreSQL: a KDC of its own, the user gssuser logs in with
+#                          Kerberos (the client keytab of KRB5_CLIENT_KTNAME)
 #   CLEARTEXT=1            the PAM user of MariaDB logs in with mysql_clear_password
 #                          instead of dialog
 #
@@ -43,6 +45,7 @@ CLEARTEXT=${CLEARTEXT:-0}
 ROW_IMAGE=${ROW_IMAGE:-FULL}
 PARTIAL_JSON=${PARTIAL_JSON:-0}
 GTID=${GTID:-1}
+GSS=${GSS:-0}
 AUTH=
 THREAD=${THREAD:-0}
 TARANTOOL_IMAGE=${TARANTOOL_IMAGE:-tarantool/tarantool:3}
@@ -104,14 +107,16 @@ case "$SERVER" in
     CLIENT=psql
     TEST=Tests/PostgreSQLTest.lua
     # A CA and a server certificate of its own, made before the server starts
-    set -- -e POSTGRES_PASSWORD=root --entrypoint sh "$SERVER_IMAGE" -c '
+    set -- -e POSTGRES_PASSWORD=root -e KRB5_CONFIG=/krb/krb5.conf -v "$WORK/krb:/krb:ro" --entrypoint sh "$SERVER_IMAGE" -c '
       set -e
       mkdir -p /certs && cd /certs
       openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj /CN=mirrorflayer-ca -keyout ca.key -out ca.pem 2>/dev/null
       openssl req -newkey rsa:2048 -nodes -subj /CN=mirrorflayer-server -keyout server.key -out server.csr 2>/dev/null
       openssl x509 -req -in server.csr -CA ca.pem -CAkey ca.key -CAcreateserial -days 2 -out server.pem 2>/dev/null
       chown postgres:postgres server.key server.pem && chmod 600 server.key
-      exec docker-entrypoint.sh postgres -c wal_level=logical -c max_replication_slots=10 -c max_wal_senders=10 \
+      printf "local all all trust\nhost all gssuser all gss include_realm=0\nhost all all all scram-sha-256\n" > /certs/pg_hba.conf
+      exec docker-entrypoint.sh postgres -c hba_file=/certs/pg_hba.conf -c krb_server_keyfile=/krb/postgres.keytab \
+        -c wal_level=logical -c max_replication_slots=10 -c max_wal_senders=10 \
         -c logical_decoding_work_mem=64kB \
         -c ssl=on -c ssl_cert_file=/certs/server.pem -c ssl_key_file=/certs/server.key'
     ;;
@@ -124,9 +129,10 @@ esac
 # The image the test runs in: the one of Tarantool with the libraries
 # Support.so needs beyond it (libsodium)
 RUN_IMAGE=mirrorflayer-run:$$
+KDC=mirrorflayer-kdc
 
 cleanup() {
-  docker rm -f -v "$DATABASE" "$TARANTOOL" "$BUILD" >/dev/null 2>&1 || true
+  docker rm -f -v "$DATABASE" "$TARANTOOL" "$BUILD" "$KDC" >/dev/null 2>&1 || true
   docker network rm "$NETWORK" >/dev/null 2>&1 || true
   docker rmi "$RUN_IMAGE" >/dev/null 2>&1 || true
   rm -rf "$WORK"
@@ -134,16 +140,44 @@ cleanup() {
 
 cleanup
 trap cleanup EXIT INT TERM
-mkdir -p "$WORK/data" "$WORK/late" "$WORK/certs"
+mkdir -p "$WORK/data" "$WORK/late" "$WORK/certs" "$WORK/krb"
 
 echo "building Support.so"
 printf 'FROM %s\nRUN apt-get update -qq >/dev/null && apt-get install -y -qq libsodium23 >/dev/null && rm -rf /var/lib/apt/lists/*\n' \
   "$TARANTOOL_IMAGE" | docker build -q -t "$RUN_IMAGE" - >/dev/null
 
 docker run --rm --name "$BUILD" -v "$SOURCE:/src" -w /src --entrypoint sh "$TARANTOOL_IMAGE" -c \
-  "apt-get update -qq >/dev/null 2>&1; apt-get install -y -qq gcc make libssl-dev zlib1g-dev libzstd-dev libsodium-dev pkg-config >/dev/null 2>&1; make SUPPORT=1 && chown $(id -u):$(id -g) Source/Support.so"
+  "apt-get update -qq >/dev/null 2>&1; apt-get install -y -qq gcc make libssl-dev zlib1g-dev libzstd-dev libsodium-dev libkrb5-dev pkg-config >/dev/null 2>&1; make SUPPORT=1 && chown $(id -u):$(id -g) Source/Support.so"
 
 docker network create "$NETWORK" >/dev/null
+
+# A KDC of the realm MIRRORFLAYER.TEST with the principals of the server and of gssuser, their keytabs in krb/
+printf '%s\n' '[libdefaults]' '  default_realm = MIRRORFLAYER.TEST' '  dns_lookup_kdc = false' \
+  '  dns_lookup_realm = false' '  rdns = false' '  dns_canonicalize_hostname = false' '  udp_preference_limit = 1' \
+  '[realms]' '  MIRRORFLAYER.TEST = {' '    kdc = mirrorflayer-kdc' '  }' > "$WORK/krb/krb5.conf"
+if [ "$GSS" = 1 ]; then
+  echo "starting a KDC"
+  chmod 777 "$WORK/krb"
+  docker run -d --name "$KDC" --network "$NETWORK" -v "$WORK/krb:/krb" debian:13 sh -c '
+    apt-get update -qq >/dev/null && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq krb5-kdc krb5-admin-server >/dev/null
+    cp /krb/krb5.conf /etc/krb5.conf
+    kdb5_util create -s -r MIRRORFLAYER.TEST -P master >/dev/null
+    kadmin.local -q "addprinc -randkey postgres/mirrorflayer-server" >/dev/null
+    kadmin.local -q "addprinc -randkey gssuser" >/dev/null
+    kadmin.local -q "ktadd -k /krb/postgres.keytab postgres/mirrorflayer-server" >/dev/null
+    kadmin.local -q "ktadd -k /krb/gssuser.keytab gssuser" >/dev/null
+    chmod 644 /krb/*.keytab
+    touch /krb/ready
+    exec krb5kdc -n' >/dev/null
+  for attempt in $(seq 1 180); do
+    [ -f "$WORK/krb/ready" ] && break
+    if [ "$attempt" = 180 ]; then
+      docker logs "$KDC" 2>&1 | tail -20
+      exit 1
+    fi
+    sleep 1
+  done
+fi
 docker run -d --name "$DATABASE" --network "$NETWORK" "$@" >/dev/null
 
 # A query over TCP: the temporary server of the first start of an image
@@ -199,7 +233,9 @@ phase() {
   echo "=== phase $1 ($SERVER, TLS $TLS, thread $THREAD, compress $COMPRESS, binlog compress $BINLOG_COMPRESS, row image $ROW_IMAGE, partial JSON $PARTIAL_JSON, GTID $GTID)"
   docker run --rm --name "$TARANTOOL" --network "$NETWORK" \
     --user "$(id -u):$(id -g)" -e HOME=/tmp -e MIRRORFLAYER_DATA=/data \
-    -e SERVER="$SERVER" -e TLS="$TLS" -e THREAD="$THREAD" -e COMPRESS="$COMPRESS" -e GTID="$GTID" -e AUTH="$AUTH" -e CLEARTEXT="$CLEARTEXT" -e SERVER_HOST="$DATABASE" \
+    -e SERVER="$SERVER" -e TLS="$TLS" -e THREAD="$THREAD" -e COMPRESS="$COMPRESS" -e GTID="$GTID" -e GSS="$GSS" \
+    -e KRB5_CONFIG=/krb/krb5.conf -e KRB5_CLIENT_KTNAME=/krb/gssuser.keytab -e KRB5CCNAME=MEMORY:mirrorflayer \
+    -v "$WORK/krb:/krb:ro" -e AUTH="$AUTH" -e CLEARTEXT="$CLEARTEXT" -e SERVER_HOST="$DATABASE" \
     -v "$SOURCE:/src:ro" -v "$WORK/$2:/data" -v "$WORK/certs:/certs:ro" -w /src \
     -v "$SOURCE/Source:/usr/share/tarantool/MirrorFlayer:ro" \
     -v "$SOURCE/Source:/usr/lib/x86_64-linux-gnu/tarantool/MirrorFlayer:ro" \

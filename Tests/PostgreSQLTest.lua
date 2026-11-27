@@ -239,6 +239,8 @@ local function setup_server()
   exec('DROP PUBLICATION IF EXISTS mirrorflayer',
     'DROP SCHEMA IF EXISTS "Registry" CASCADE',
     'DROP ROLE IF EXISTS replica',
+    'DROP ROLE IF EXISTS gssuser',
+    'CREATE ROLE gssuser LOGIN',
     'CREATE SCHEMA "Registry"',
     [[CREATE TYPE "Registry"."Color" AS ENUM ('red', 'green', 'blue')]],
     'CREATE DOMAIN "Registry"."Positive" AS INTEGER CHECK (VALUE > 0)',
@@ -429,6 +431,16 @@ local function load()
   ok(probe.mechanism == (TLS ~= 'off' and 'SCRAM-SHA-256-PLUS' or 'SCRAM-SHA-256'), 'SCRAM mechanism %s',
     tostring(probe.mechanism))
   probe:close()
+  -- GSS=1: Kerberos with the client keytab, no password
+  if os.getenv('GSS') == '1' then
+    local status, kerberos = pcall(protocol.connect, { host = HOST, port = 5432, user = 'gssuser', database = 'postgres',
+      timeout = 30, tls = TLS ~= 'off' and { verify = 'none' } or nil })
+    ok(status and kerberos.mechanism == 'GSS' and kerberos:value('SELECT current_user') == 'gssuser',
+      'GSSAPI: %s', status and tostring(kerberos.mechanism) or tostring(kerberos))
+    if status then
+      kerberos:close()
+    end
+  end
   locations_equal('load')
   ok(box.space.GlobalProfiles:count() == 20000, 'GlobalProfiles has 20000 rows')
   ok(encode(box.space.GlobalProfiles:get(5)) == encode({ 5, 'C5', 1, 5 }), 'GlobalProfiles columns follow the space format')
