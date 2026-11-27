@@ -268,12 +268,9 @@ they are installed as `$(PREFIX)/share/tarantool/MirrorFlayer/` with the
 `MySQL/` and `PostgreSQL/` subdirectories, which is what
 `require('MirrorFlayer')` finds. Only `init.lua` is lowercase: that is the
 file Lua looks for in a package directory. `Source/Support.c` is
-`MirrorFlayer.Support` (TLS, RSA and inflate), installed as
-`$(PREFIX)/lib/<triplet>/tarantool/MirrorFlayer/Support.so`; it needs the
-headers of `tarantool-dev`, `libssl-dev`, `zlib1g-dev`, `libzstd-dev` and
-`libsodium-dev` and `libkrb5-dev` and links the system OpenSSL, zlib, zstd,
-libsodium and GSSAPI of MIT Kerberos: a host needs their libraries
-(`libsodium23` is not in every image), or the module does not load at all. Up to 2.2 it was `MirrorFlayer.TLS` (`TLS.so`).
+`MirrorFlayer.Support`, installed as
+`$(PREFIX)/lib/<triplet>/tarantool/MirrorFlayer/Support.so`. Up to 2.2 it was
+`MirrorFlayer.TLS` (`TLS.so`).
 
 ```
 make                                       # Source/Support.so, stripped (STRIP=true keeps it as built)
@@ -287,13 +284,37 @@ connections work, compressed binlog events stop the replicator, and
 `caching_sha2_password` works only while the server has the password cached
 (it needs RSA for the full authentication without TLS).
 
-With LuaRocks of Tarantool (`tt rocks`), the same headers are needed:
+With LuaRocks of Tarantool (`tt rocks`), the same headers are needed (see *Libraries*):
 
 ```
 tt rocks install https://raw.githubusercontent.com/cyanide-burnout/MirrorFlayer/2.2.2/mirrorflayer-2.2.2-1.rockspec
 tt rocks install https://raw.githubusercontent.com/cyanide-burnout/MirrorFlayer/main/mirrorflayer-scm-1.rockspec   # main
 tt rocks make mirrorflayer-scm-1.rockspec   # from a checkout
 ```
+
+### Libraries
+
+`Support.so` links these system libraries; the Lua modules need none.
+Building needs their headers, a host that runs it needs the libraries
+themselves, all of them, or the module does not load at all (and TLS,
+compression and the authentication below go with it). `libsodium23` in
+particular is not in every image, the official ones of Tarantool lack it.
+The rockspec cannot install them: they come from the system.
+
+| Library | Debian, Ubuntu: run | Build | What for |
+|---|---|---|---|
+| OpenSSL | `libssl3t64` (`libssl3` before Debian 13) | `libssl-dev` | TLS, RSA of `caching_sha2_password` and `sha256_password`, PBKDF2 and Ed25519 of `parsec`, SCRAM-SHA-256-PLUS |
+| zlib | `zlib1g` | `zlib1g-dev` | the compressed protocol, compressed binlog events of MariaDB, CRC32 of binlog events |
+| zstd | `libzstd1` | `libzstd-dev` | the compressed protocol with zstd and compressed transactions of MySQL |
+| libsodium | `libsodium23` | `libsodium-dev` | `client_ed25519` of MariaDB |
+| GSSAPI of MIT Kerberos | `libgssapi-krb5-2` | `libkrb5-dev` | GSSAPI (Kerberos) of PostgreSQL |
+| Tarantool | — | `tarantool-dev` (3.x) | `module.h` and the Lua API |
+
+```
+apt-get install libssl3t64 zlib1g libzstd1 libsodium23 libgssapi-krb5-2                                   # run
+apt-get install build-essential tarantool-dev libssl-dev zlib1g-dev libzstd-dev libsodium-dev libkrb5-dev  # build
+```
+
 
 ## Tests
 
