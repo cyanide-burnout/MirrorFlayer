@@ -99,26 +99,35 @@ function Runner:refresh(source)
   end
 end
 
--- Loads one table over its targets; with flush its spaces are emptied first
-function Runner:fill(connection, source, flush)
+-- Loads the tables over their targets in one query of the driver, one after
+-- another; with flush their spaces are emptied first
+function Runner:fill(connection, sources, flush)
   local chunk = self.config.batch * 10
-  local rows  = {}
-  local count = 0
-  self.sink:load_begin(source.id, flush == true)
-  connection:load(source, function (row)
+  local rows    = {}
+  local count   = 0
+  local current = 1
+  self.sink:load_begin(sources[1].id, flush == true)
+  connection:load(sources, function (source, row)
     table.insert(rows, row)
     count = count + 1
     if #rows >= chunk then
       self.sink:load_rows(source.id, rows)
       rows = {}
     end
+  end, function (source)
+    if #rows > 0 then
+      self.sink:load_rows(source.id, rows)
+      rows = {}
+    end
+    local written, deleted, aborts = self.sink:load_finish(source.id)
+    self:say('info', '%s: %d rows loaded, %d written, %d stale rows deleted, %d aborted by triggers', source.id,
+      count, written, deleted, aborts)
+    count   = 0
+    current = current + 1
+    if sources[current] then
+      self.sink:load_begin(sources[current].id, flush == true)
+    end
   end)
-  if #rows > 0 then
-    self.sink:load_rows(source.id, rows)
-  end
-  local written, deleted, aborts = self.sink:load_finish(source.id)
-  self:say('info', '%s: %d rows loaded, %d written, %d stale rows deleted, %d aborted by triggers', source.id,
-    count, written, deleted, aborts)
 end
 
 -- Takes the position of the source first, then loads every table; changes
@@ -128,9 +137,7 @@ function Runner:load(connection, flush)
   local started = clock.time()
   self.sink:report({ status = 'loading' })
   self:say('info', 'full load at %s%s', state ~= '' and state or '(start)', flush and ', spaces emptied' or '')
-  for _, source in ipairs(self.order) do
-    self:fill(connection, source, flush)
-  end
+  self:fill(connection, self.order, flush)
   self.sink:loaded(state)
   self:say('info', 'full load done in %.1f s', clock.time() - started)
   return state
@@ -139,13 +146,19 @@ end
 -- Loads alone the tables whose spaces are all empty though the position is
 -- there (a space made anew or emptied by hand). The stream then comes from
 -- the older position over the newer rows and converges, applying is
--- idempotent; the table may be empty at the source too, then it costs a query
+-- idempotent; the table may be empty at the source too. All of them in one query
 function Runner:refill(connection)
+  local empty = {}
   for _, source in ipairs(self.order) do
     if self.sink:empty(source.id) then
-      self.sink:report({ status = 'loading' })
       self:say('info', '%s: its spaces are empty, loading the table', source.id)
-      self:fill(connection, source, false)
+      table.insert(empty, source)
+    end
+  end
+  if #empty > 0 then
+    self.sink:report({ status = 'loading' })
+    self:fill(connection, empty, false)
+    for _ = 1, #empty do
       self.sink:filled()
     end
   end

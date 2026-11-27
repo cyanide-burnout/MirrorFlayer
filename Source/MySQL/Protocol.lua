@@ -21,10 +21,13 @@ local CLIENT_PROTOCOL_41                    = 0x00000200
 local CLIENT_SSL                            = 0x00000800
 local CLIENT_TRANSACTIONS                   = 0x00002000
 local CLIENT_SECURE_CONNECTION              = 0x00008000
+local CLIENT_MULTI_STATEMENTS               = 0x00010000
 local CLIENT_MULTI_RESULTS                  = 0x00020000
 local CLIENT_PLUGIN_AUTH                    = 0x00080000
 local CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA = 0x00200000
 local CLIENT_ZSTD_COMPRESSION_ALGORITHM     = 0x04000000
+
+local SERVER_MORE_RESULTS_EXISTS = 0x0008
 
 -- The level of zstd the server compresses with
 local ZSTD_LEVEL = 3
@@ -542,7 +545,7 @@ function Connection:handshake(user, database)
   end
 
   flags = bor(CLIENT_LONG_PASSWORD, CLIENT_LONG_FLAG, CLIENT_PROTOCOL_41,
-    CLIENT_TRANSACTIONS, CLIENT_SECURE_CONNECTION, CLIENT_MULTI_RESULTS,
+    CLIENT_TRANSACTIONS, CLIENT_SECURE_CONNECTION, CLIENT_MULTI_STATEMENTS, CLIENT_MULTI_RESULTS,
     CLIENT_PLUGIN_AUTH, CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA)
   if database ~= nil then
     flags = bor(flags, CLIENT_CONNECT_WITH_DB)
@@ -643,58 +646,78 @@ local function is_eof(packet)
   return byte(packet, 1) == 0xfe and #packet < 9
 end
 
--- Runs a statement. For a result set calls each(row) for every row, where row
+-- Runs statements. For a result set calls each(row) for every row, where row
 -- is an array of strings with box.NULL for NULL, and returns the column
 -- definitions; without each the rows are collected and returned second.
--- For other statements returns nil and the affected row count.
-function Connection:query(sql, each)
-  local packet, first, count, columns, rows, data, row
+-- For other statements returns nil and the affected row count. Several
+-- statements separated with ; give their results one after another, done(index)
+-- at the end of each
+function Connection:query(sql, each, done)
+  local packet, first, count, columns, rows, data, row, affected, status
+  local index = 0
 
   self:command(char(COM_QUERY) .. sql)
-  packet = self:read_packet()
-  first  = byte(packet, 1)
-
-  if first == 0x00 then
-    return nil, reader(packet, 2):lenenc()
-  end
-  if first == 0xff then
-    error(server_error(packet), 0)
-  end
-  if first == 0xfb then
-    fatal('LOCAL INFILE requested by the server')
-  end
-
-  count   = reader(packet):lenenc()
-  columns = {}
-  for index = 1, count do
-    columns[index] = column_definition(self:read_packet())
-  end
-  packet = self:read_packet()
-  if not is_eof(packet) then
-    error(failure('expected EOF after column definitions'), 0)
-  end
 
   if each == nil then
     rows = {}
     each = function (value) table.insert(rows, value) end
   end
 
-  while true do
+  repeat
+    index  = index + 1
     packet = self:read_packet()
-    if is_eof(packet) then
-      break
-    end
-    if byte(packet, 1) == 0xff then
+    first  = byte(packet, 1)
+
+    if first == 0xff then
       error(server_error(packet), 0)
     end
-    data = reader(packet)
-    row  = {}
-    for index = 1, count do
-      row[index] = data:lenstr()
+    if first == 0xfb then
+      fatal('LOCAL INFILE requested by the server')
     end
-    each(row)
-  end
 
+    if first == 0x00 then
+      data     = reader(packet, 2)
+      affected = data:lenenc()
+      data:lenenc() -- last insert id
+      status   = data:u16()
+    else
+      count   = reader(packet):lenenc()
+      columns = {}
+      for column = 1, count do
+        columns[column] = column_definition(self:read_packet())
+      end
+      packet = self:read_packet()
+      if not is_eof(packet) then
+        error(failure('expected EOF after column definitions'), 0)
+      end
+      while true do
+        packet = self:read_packet()
+        if is_eof(packet) then
+          data   = reader(packet, 2)
+          data:u16() -- warnings
+          status = data:u16()
+          break
+        end
+        if byte(packet, 1) == 0xff then
+          error(server_error(packet), 0)
+        end
+        data = reader(packet)
+        row  = {}
+        for column = 1, count do
+          row[column] = data:lenstr()
+        end
+        each(row)
+      end
+    end
+
+    if done then
+      done(index)
+    end
+  until band(status, SERVER_MORE_RESULTS_EXISTS) == 0
+
+  if not columns then
+    return nil, affected
+  end
   return columns, rows
 end
 

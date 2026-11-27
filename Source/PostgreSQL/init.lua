@@ -151,27 +151,36 @@ function Session:position()
   return self.slot .. '/' .. start
 end
 
--- Reads the table row by row, values converted: in the snapshot of the slot
--- after position(), else in a snapshot of its own (a table loaded alone, the
--- stream from the stored position converges over it)
-function Session:load(source, each)
+-- Reads the tables in one query, a SELECT of each, values converted:
+-- each(source, row) for every row, done(source) at the end of a table. In the
+-- snapshot of the slot after position(), else in a snapshot of its own (tables
+-- loaded alone, the stream from the stored position converges over them)
+function Session:load(sources, each, done)
   if self.loader == nil then
     self.loader = open(self.config, self.host, self.port, false)
     self.loader:query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY')
   end
-  local columns = source.columns
-  local names   = {}
-  for index, item in ipairs(columns) do
-    names[index] = protocol.identifier(item.name)
+  local statements = {}
+  for index, source in ipairs(sources) do
+    local names = {}
+    for position, item in ipairs(source.columns) do
+      names[position] = protocol.identifier(item.name)
+    end
+    statements[index] = string.format('SELECT %s FROM %s.%s', table.concat(names, ', '),
+      protocol.identifier(source.database), protocol.identifier(source.table))
   end
-  self.loader:query(string.format('SELECT %s FROM %s.%s', table.concat(names, ', '),
-    protocol.identifier(source.database), protocol.identifier(source.table)), function (raw)
-      local row = {}
-      for index, item in ipairs(columns) do
-        row[index] = column.text(item, raw[index])
-      end
-      each(row)
-    end)
+  local current = 1
+  self.loader:query(table.concat(statements, '; '), function (raw)
+    local source = sources[current]
+    local row    = {}
+    for index, item in ipairs(source.columns) do
+      row[index] = column.text(item, raw[index])
+    end
+    each(source, row)
+  end, function (index)
+    current = index + 1
+    done(sources[index])
+  end)
 end
 
 -- Stream -------------------------------------------------------------------------

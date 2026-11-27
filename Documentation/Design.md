@@ -23,10 +23,12 @@ Usage and values are in the [README](../README.md).
   makes the next start do a full load.
 * **Full load** (first start, error 1236, `TRUNCATE` of a mapped table, a table
   map that does not match the table definition): the GTID state
-  (`@@gtid_binlog_pos`, `@@gtid_executed` on MySQL) is read first, then each table is selected with
-  `COM_QUERY` and streamed; rows are written over the space in batches with
-  `fiber.yield()` between them, then rows absent from the snapshot are deleted,
-  so spaces never go empty. Changes made during the load come again from the
+  (`@@gtid_binlog_pos`, `@@gtid_executed` on MySQL) is read first, then all tables are selected with
+  one `COM_QUERY`, a `SELECT` of each separated with `;` (`CLIENT_MULTI_STATEMENTS`), one round
+  trip for the load, and their results streamed one after another; rows are written over the space
+  in batches with `fiber.yield()` between them, then rows absent from the snapshot are deleted,
+  so spaces never go empty. The server waits meanwhile with the next result (`net_write_timeout`,
+  60 s by default, against seconds of deleting). Changes made during the load come again from the
   binlog; applying is idempotent (`INSERT` → `replace`, `DELETE` of a missing
   row does nothing), so the overlap is safe.
 * **Errors.** 1236 (the position is no longer in the binlog) → full load.
@@ -106,7 +108,7 @@ of binlogs: a driver gives it a session on one host.
 | `driver.connect(config, host, port)` | connects and returns a session with `version` and `secure` |
 | `session:describe(sources)` | the columns of the tables in one query, `{ [source] = columns }`: name, type, kind, supported |
 | `session:position()` | the current position of the source as a string |
-| `session:load(source, each)` | the snapshot of the table, `each(row)` with values converted |
+| `session:load(sources, each, done)` | the snapshot of the tables in one query, a `SELECT` of each: `each(source, row)` with values converted, `done(source)` at the end of a table |
 | `session:stream(position, sources, handler)` | changes after the position until an error: `handler:started()`, `handler:commit(changes, position, event_time)`, `handler:heartbeat()`, `handler:refresh(source)` after DDL |
 | `session:close()` | closes the connection |
 

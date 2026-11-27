@@ -345,10 +345,13 @@ end
 -- Runs SQL with the simple query protocol. each(row) gets every row as it
 -- comes (text values or box.NULL); without it the rows are returned. Returns
 -- the names of the columns, the rows and the command tag of the last result.
--- A copy started by the statement (START_REPLICATION) returns with copy set.
-function Connection:query(sql, each)
+-- Several statements separated with ; give their results one after another,
+-- done(index) at the end of each. A copy started by the statement
+-- (START_REPLICATION) returns with copy set.
+function Connection:query(sql, each, done)
   self:send('Q', sql .. '\0')
   local names, rows, tag, problem = {}, {}, nil, nil
+  local index = 0
   while true do
     local kind, payload = self:receive()
     if kind == 'D' then
@@ -373,7 +376,11 @@ function Connection:query(sql, each)
         data:bytes(18) -- table, column, type, size, modifier, format
       end
     elseif kind == 'C' then
-      tag = reader(payload):cstring()
+      tag   = reader(payload):cstring()
+      index = index + 1
+      if done then
+        done(index)
+      end
     elseif kind == 'E' then
       problem = server_error(payload)
     elseif kind == 'Z' then

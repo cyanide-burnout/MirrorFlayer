@@ -6,7 +6,8 @@
 -- A driver gives the engine (MirrorFlayer) a session on one host:
 --   session:describe(sources)         columns of the tables, { [source] = columns }
 --   session:position()                the current position of the source
---   session:load(source, each)        the rows of the table, values converted
+--   session:load(sources, each, done) the rows of the tables in one query, values
+--                                     converted: each(source, row), done(source)
 --   session:stream(state, sources, handler)
 --                                     changes after the position, until an error:
 --                                     handler:started(), handler:commit(changes,
@@ -174,21 +175,30 @@ function Session:position()
   return self.dialect.position(self.connection)
 end
 
--- Reads the table row by row, values converted, for each(row)
-function Session:load(source, each)
-  local columns = source.columns
-  local names   = {}
-  for index, item in ipairs(columns) do
-    names[index] = protocol.identifier(item.name)
+-- Reads the tables in one query, a SELECT of each, values converted:
+-- each(source, row) for every row, done(source) at the end of a table
+function Session:load(sources, each, done)
+  local statements = {}
+  for index, source in ipairs(sources) do
+    local names = {}
+    for position, item in ipairs(source.columns) do
+      names[position] = protocol.identifier(item.name)
+    end
+    statements[index] = string.format('SELECT %s FROM %s.%s', table.concat(names, ', '),
+      protocol.identifier(source.database), protocol.identifier(source.table))
   end
-  self.connection:query(string.format('SELECT %s FROM %s.%s', table.concat(names, ', '),
-    protocol.identifier(source.database), protocol.identifier(source.table)), function (raw)
-      local row = {}
-      for index, item in ipairs(columns) do
-        row[index] = column.text(item, raw[index])
-      end
-      each(row)
-    end)
+  local current = 1
+  self.connection:query(table.concat(statements, '; '), function (raw)
+    local source = sources[current]
+    local row    = {}
+    for index, item in ipairs(source.columns) do
+      row[index] = column.text(item, raw[index])
+    end
+    each(source, row)
+  end, function (index)
+    current = index + 1
+    done(sources[index])
+  end)
 end
 
 -- Binlog stream --------------------------------------------------------------
