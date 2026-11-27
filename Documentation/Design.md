@@ -51,10 +51,16 @@ MySQL). Tarantool 3.x (LuaJIT).
 
 * **Galera.** With `wsrep_on`, a node is used only while `wsrep_ready` is ON
   and its cluster status `Primary`: on connect, and every `check` seconds
-  during the stream over a short connection of its own, since a node that
-  leaves the primary component goes silent rather than breaking the stream.
-  A node that is not ready is a failure like any other, the next host is
-  tried.
+  during the stream over a short connection of its own in a fiber of its own,
+  since a node that leaves the primary component goes silent rather than
+  breaking the stream. The stream is read meanwhile; a failed check ends it at
+  the next packet, a heartbeat at the latest. A node that is not ready is a
+  failure like any other, the next host is tried.
+* **Round trips.** Each step from connect to the stream costs one round trip
+  to the source, statements separated with `;` (`CLIENT_MULTI_STATEMENTS`):
+  the time zone with the state of Galera (and `gtid_mode` of MySQL), the
+  columns of all tables (with the checks of MariaDB), the position, the load of
+  all tables, the variables of the replica with the checksum of the binlog.
 * **Tables loaded alone.** A table whose spaces are all empty while a
   position is stored is loaded by itself before the stream (`fills`); the
   stream from the older position converges over it.
@@ -180,19 +186,19 @@ PostgreSQL 12 and 13 stay on version 1.
 ### Stream request (MariaDB)
 
 ```
-SET @master_binlog_checksum = @@GLOBAL.binlog_checksum
-SET @mariadb_slave_capability = 4
-SET @slave_connect_state = '<gtid state>'
-SET @slave_gtid_strict_mode = 0, @slave_gtid_ignore_duplicates = 0
-SET @master_heartbeat_period = <ns>
+SET @master_binlog_checksum = @@GLOBAL.binlog_checksum, @mariadb_slave_capability = 4,
+    @slave_connect_state = '<gtid state>', @slave_gtid_strict_mode = 0,
+    @slave_gtid_ignore_duplicates = 0, @master_heartbeat_period = <ns>;
+  SELECT @@GLOBAL.binlog_checksum                       (one round trip)
 COM_BINLOG_DUMP (position 4, flags 0, server id, no file name)
 ```
 
 ### Stream request (MySQL)
 
 ```
-SET @master_binlog_checksum = @@GLOBAL.binlog_checksum   (and @source_binlog_checksum)
-SET @master_heartbeat_period = <ns>                      (and @source_heartbeat_period)
+SET @master_binlog_checksum = @@GLOBAL.binlog_checksum, @source_binlog_checksum = ...,
+    @master_heartbeat_period = <ns>, @source_heartbeat_period = <ns>;
+  SELECT @@GLOBAL.gtid_mode, @@GLOBAL.binlog_checksum   (one round trip)
 COM_BINLOG_DUMP_GTID (flags BINLOG_THROUGH_GTID, server id, no file name, position 4,
                       the GTID set: sids, each with intervals [first, last + 1))
 ```

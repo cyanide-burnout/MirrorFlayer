@@ -17,7 +17,7 @@
 -- A change is { source, operation, old, new }; operation is 'insert',
 -- 'update' or 'delete', old and new are rows in the order of source.columns.
 
-local clock = require('clock')
+local fiber = require('fiber')
 
 local protocol = require('MirrorFlayer.MySQL.Protocol')
 local column   = require('MirrorFlayer.MySQL.Column')
@@ -51,15 +51,13 @@ end
 
 -- A node of Galera is used only while it is ready and in the primary
 -- component: a node that is not answers its clients with error 1047 or has a
--- stale binlog. Returns true for a node of Galera, raises for one not ready;
--- a server without wsrep (MySQL, MariaDB alone) has nothing to check
-local function ready(connection)
-  local _, rows = connection:query("SHOW GLOBAL VARIABLES LIKE 'wsrep_on'")
-  if #rows == 0 or string.upper(tostring(rows[1][2])) ~= 'ON' then
+-- stale binlog. Takes the rows of SHOW GLOBAL VARIABLES LIKE 'wsrep_on' and of
+-- SHOW GLOBAL STATUS of wsrep; returns true for a node of Galera, raises for one
+-- not ready; a server without wsrep (MySQL, MariaDB alone) has nothing to check
+local function ready(variables, rows)
+  if #variables == 0 or string.upper(tostring(variables[1][2])) ~= 'ON' then
     return false
   end
-  _, rows = connection:query('SHOW GLOBAL STATUS WHERE Variable_name IN ' ..
-    "('wsrep_ready', 'wsrep_cluster_status', 'wsrep_local_state_comment')")
   local status = {}
   for _, row in ipairs(rows) do
     status[string.lower(row[1])] = tostring(row[2])
@@ -85,13 +83,16 @@ local function connect(config, host, port)
     public_key = config.public_key,
     compress   = config.compress
   })
+  -- The time zone, the state of Galera and gtid_mode of MySQL in one round trip
   local status, galera, mode = pcall(function ()
-    connection:query("SET time_zone = '+00:00'")
-    local cluster = ready(connection)
+    local results = connection:results("SET time_zone = '+00:00'; SHOW GLOBAL VARIABLES LIKE 'wsrep_on'; " ..
+      "SHOW GLOBAL STATUS WHERE Variable_name IN ('wsrep_ready', 'wsrep_cluster_status', 'wsrep_local_state_comment')" ..
+      (connection.mariadb and '' or '; SELECT @@GLOBAL.gtid_mode'))
+    local cluster = ready(results[2], results[3])
     if connection.mariadb then
       return cluster
     end
-    return cluster, string.upper(tostring(connection:value('SELECT @@GLOBAL.gtid_mode')))
+    return cluster, string.upper(tostring(results[4][1][1]))
   end)
   if not status then
     connection:close()
@@ -116,8 +117,8 @@ function Session:close()
   self.connection:close()
 end
 
--- Reads the columns of the source tables from information_schema in one query
--- (and the checks of MariaDB in another), { [source] = columns }
+-- Reads the columns of the source tables from information_schema in one round
+-- trip (with the checks of MariaDB), { [source] = columns }
 function Session:describe(sources)
   local connection = self.connection
   local schemas, tables = {}, {}
@@ -125,23 +126,25 @@ function Session:describe(sources)
     schemas[index] = protocol.literal(source.database)
     tables[index]  = protocol.literal(source.table)
   end
-  -- JSON of MariaDB is LONGTEXT with a json_valid() check
-  local json = {}
-  if connection.mariadb then
-    local _, checks = connection:query(string.format(
-      'SELECT CONSTRAINT_SCHEMA, TABLE_NAME, CHECK_CLAUSE FROM information_schema.CHECK_CONSTRAINTS ' ..
-      'WHERE CONSTRAINT_SCHEMA IN (%s) AND TABLE_NAME IN (%s)', table.concat(schemas, ', '), table.concat(tables, ', ')))
-    for _, row in ipairs(checks) do
-      local name = string.match(row[3], '^json_valid%(`(.-)`%)$')
-      if name ~= nil then
-        json[row[1] .. '\0' .. row[2] .. '\0' .. name] = true
-      end
-    end
-  end
-  local _, rows = connection:query(string.format(
+  schemas, tables = table.concat(schemas, ', '), table.concat(tables, ', ')
+  local sql = string.format(
     'SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, DATA_TYPE, COLUMN_TYPE FROM information_schema.COLUMNS ' ..
     'WHERE TABLE_SCHEMA IN (%s) AND TABLE_NAME IN (%s) ORDER BY TABLE_SCHEMA, TABLE_NAME, ORDINAL_POSITION',
-    table.concat(schemas, ', '), table.concat(tables, ', ')))
+    schemas, tables)
+  -- JSON of MariaDB is LONGTEXT with a json_valid() check
+  if connection.mariadb then
+    sql = sql .. string.format('; SELECT CONSTRAINT_SCHEMA, TABLE_NAME, CHECK_CLAUSE FROM ' ..
+      'information_schema.CHECK_CONSTRAINTS WHERE CONSTRAINT_SCHEMA IN (%s) AND TABLE_NAME IN (%s)', schemas, tables)
+  end
+  local results = connection:results(sql)
+  local rows    = results[1]
+  local json    = {}
+  for _, row in ipairs(results[2] or {}) do
+    local name = string.match(row[3], '^json_valid%(`(.-)`%)$')
+    if name then
+      json[row[1] .. '\0' .. row[2] .. '\0' .. name] = true
+    end
+  end
   -- Columns by schema and table as the server gives them and in lower case
   -- (lower_case_table_names, case-insensitive file systems)
   local described = {}
@@ -408,33 +411,55 @@ function Session:stream(state, sources, handler)
   })
   handler:started()
 
-  local timeout = self.config.heartbeat * 3
-  local checked = clock.time()
-  while true do
-    -- A node of Galera is asked again whether it is ready, over a connection
-    -- of its own: one that left the primary component goes silent, it does
-    -- not break the stream
-    if self.galera and clock.time() - checked >= self.config.check then
-      connect(self.config, self.host, self.port):close()
-      checked = clock.time()
-    end
-    local packet = connection:read_packet(timeout)
-    local first  = string.byte(packet, 1)
-    if first == 0xff then
-      local problem = protocol.server_error(packet)
-      if problem.code == LOST_POSITION then
-        problem.reload = true
+  -- A node of Galera is asked again whether it is ready, over a connection of
+  -- its own in a fiber of its own, the stream is read meanwhile: one that left
+  -- the primary component goes silent, it does not break the stream. Its
+  -- failure ends the stream at the next packet (a heartbeat at the latest)
+  local watch = { cond = fiber.cond() }
+  if self.galera then
+    fiber.create(function ()
+      while not watch.stopped do
+        watch.cond:wait(self.config.check)
+        if watch.stopped then
+          return
+        end
+        local status, problem = pcall(function ()
+          connect(self.config, self.host, self.port):close()
+        end)
+        if not status then
+          watch.problem = problem
+          return
+        end
       end
-      error(problem, 0)
-    end
-    if first == 0xfe and #packet < 9 then
-      error(failure('binlog stream ended by the server'), 0)
-    end
-    if first ~= 0x00 then
-      error(failure(string.format('unexpected packet 0x%02x in the binlog stream', first)), 0)
-    end
-    self:event(string.sub(packet, 2))
+    end)
   end
+
+  -- The stream ends only with an error; the watcher stops with it
+  local timeout = self.config.heartbeat * 3
+  local _, problem = pcall(function ()
+    while not watch.problem do
+      local packet = connection:read_packet(timeout)
+      local first  = string.byte(packet, 1)
+      if first == 0xff then
+        local refused = protocol.server_error(packet)
+        if refused.code == LOST_POSITION then
+          refused.reload = true
+        end
+        error(refused, 0)
+      end
+      if first == 0xfe and #packet < 9 then
+        error(failure('binlog stream ended by the server'), 0)
+      end
+      if first ~= 0x00 then
+        error(failure(string.format('unexpected packet 0x%02x in the binlog stream', first)), 0)
+      end
+      self:event(string.sub(packet, 2))
+    end
+    error(watch.problem, 0)
+  end)
+  watch.stopped = true
+  watch.cond:signal()
+  error(problem, 0)
 end
 
 return {

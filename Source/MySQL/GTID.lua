@@ -139,11 +139,12 @@ end
 
 -- Current binlog position of the server as a GTID set string
 local function position(connection)
-  local mode = tostring(connection:value('SELECT @@GLOBAL.gtid_mode'))
+  local _, rows = connection:query('SELECT @@GLOBAL.gtid_mode, @@GLOBAL.gtid_executed')
+  local mode    = tostring(rows[1][1])
   if string.upper(mode) ~= 'ON' then
     protocol.fatal('gtid_mode of the source is %s, MirrorFlayer needs ON', mode)
   end
-  local value = connection:value('SELECT @@GLOBAL.gtid_executed')
+  local value = rows[1][2]
   if value == box.NULL or value == nil then
     return ''
   end
@@ -276,16 +277,15 @@ end
 -- options: state, server, heartbeat (seconds)
 -- Returns true when events carry CRC32.
 local function request(connection, options)
-  local mode = tostring(connection:value('SELECT @@GLOBAL.gtid_mode'))
+  -- The variables of a replica, gtid_mode and the checksum of the binlog in one round trip
+  local heartbeat = math.floor(options.heartbeat * 1e9)
+  local _, rows   = connection:query(format('SET @master_binlog_checksum = @@GLOBAL.binlog_checksum, ' ..
+    '@source_binlog_checksum = @@GLOBAL.binlog_checksum, @master_heartbeat_period = %d, ' ..
+    '@source_heartbeat_period = %d; SELECT @@GLOBAL.gtid_mode, @@GLOBAL.binlog_checksum', heartbeat, heartbeat))
+  local mode, checksum = tostring(rows[1][1]), rows[1][2]
   if string.upper(mode) ~= 'ON' then
     protocol.fatal('gtid_mode of the source is %s, MirrorFlayer needs ON', mode)
   end
-  local checksum  = connection:value('SELECT @@GLOBAL.binlog_checksum')
-  local heartbeat = math.floor(options.heartbeat * 1e9)
-  connection:query('SET @master_binlog_checksum = @@GLOBAL.binlog_checksum')
-  connection:query('SET @source_binlog_checksum = @@GLOBAL.binlog_checksum')
-  connection:query(format('SET @master_heartbeat_period = %d', heartbeat))
-  connection:query(format('SET @source_heartbeat_period = %d', heartbeat))
   local data = encode(parse(options.state))
   connection:command(char(COM_BINLOG_DUMP_GTID) .. protocol.u16(BINLOG_THROUGH_GTID) .. protocol.u32(options.server) ..
     protocol.u32(0) .. protocol.u64(4) .. protocol.u32(#data) .. data)

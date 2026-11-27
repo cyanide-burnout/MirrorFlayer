@@ -721,6 +721,19 @@ function Connection:query(sql, each, done)
   return columns, rows
 end
 
+-- Runs statements separated with ; in one round trip and returns the rows of
+-- each result in order: an empty list for a statement without a result set
+function Connection:results(sql)
+  local results, rows = {}, {}
+  self:query(sql, function (row)
+    table.insert(rows, row)
+  end, function (index)
+    results[index] = rows
+    rows = {}
+  end)
+  return results
+end
+
 -- Returns the first column of the first row
 function Connection:value(sql)
   local _, rows = self:query(sql)

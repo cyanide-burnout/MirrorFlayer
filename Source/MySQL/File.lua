@@ -10,10 +10,6 @@ local format = string.format
 
 local COM_BINLOG_DUMP = 0x12
 
--- The server of the connection, the identity of its binlog files
-local function server(connection)
-  return string.lower(tostring(connection:value('SELECT @@GLOBAL.server_uuid')))
-end
 
 -- Parses 'file:uuid:binlog.000003:1234' into { server, file, offset }
 local function parse(state)
@@ -47,14 +43,18 @@ end
 
 -- The binlog file and offset of the server now
 local function position(connection)
-  local status, columns, rows = pcall(connection.query, connection, 'SHOW BINARY LOG STATUS')
+  -- The server, the identity of its binlog files, and its binlog in one round
+  -- trip; SHOW MASTER STATUS before MySQL 8.2
+  local status, results = pcall(connection.results, connection, 'SELECT @@GLOBAL.server_uuid; SHOW BINARY LOG STATUS')
   if not status then
-    columns, rows = connection:query('SHOW MASTER STATUS')
+    results = connection:results('SELECT @@GLOBAL.server_uuid; SHOW MASTER STATUS')
   end
-  if rows[1] == nil then
+  local rows = results[2]
+  if not rows[1] then
     protocol.fatal('the source has no binary log (log_bin)')
   end
-  return format_state({ server = server(connection), file = rows[1][1], offset = tonumber(rows[1][2]) })
+  return format_state({ server = string.lower(tostring(results[1][1][1])), file = rows[1][1],
+    offset = tonumber(rows[1][2]) })
 end
 
 -- GTID_LOG_EVENT, ANONYMOUS_GTID_LOG_EVENT: a transaction begins; its GTID,
@@ -66,17 +66,16 @@ end
 -- Asks the server to stream the binlog from the file and offset; a position
 -- of another server means a full load. Returns true when events carry CRC32
 local function request(connection, options)
-  local state = parse(options.state)
-  local uuid  = server(connection)
+  -- The variables of a replica, the server and the checksum of the binlog in one round trip
+  local state     = parse(options.state)
+  local heartbeat = math.floor(options.heartbeat * 1e9)
+  local _, rows   = connection:query(format('SET @master_binlog_checksum = @@GLOBAL.binlog_checksum, ' ..
+    '@source_binlog_checksum = @@GLOBAL.binlog_checksum, @master_heartbeat_period = %d, ' ..
+    '@source_heartbeat_period = %d; SELECT @@GLOBAL.server_uuid, @@GLOBAL.binlog_checksum', heartbeat, heartbeat))
+  local uuid, checksum = string.lower(tostring(rows[1][1])), rows[1][2]
   if state.server ~= uuid then
     errors.reload('the binlog position is one of server %s, this is %s: a full load follows', state.server, uuid)
   end
-  local checksum  = connection:value('SELECT @@GLOBAL.binlog_checksum')
-  local heartbeat = math.floor(options.heartbeat * 1e9)
-  connection:query('SET @master_binlog_checksum = @@GLOBAL.binlog_checksum')
-  connection:query('SET @source_binlog_checksum = @@GLOBAL.binlog_checksum')
-  connection:query(format('SET @master_heartbeat_period = %d', heartbeat))
-  connection:query(format('SET @source_heartbeat_period = %d', heartbeat))
   connection:command(string.char(COM_BINLOG_DUMP) .. protocol.u32(state.offset) .. protocol.u16(0) ..
     protocol.u32(options.server) .. state.file)
   return string.upper(tostring(checksum)) == 'CRC32'

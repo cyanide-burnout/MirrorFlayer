@@ -76,13 +76,11 @@ end
 -- options: state, server, heartbeat (seconds)
 -- Returns true when events carry CRC32.
 local function request(connection, options)
-  local checksum = connection:value('SELECT @@GLOBAL.binlog_checksum')
-  connection:query('SET @master_binlog_checksum = @@GLOBAL.binlog_checksum')
-  connection:query('SET @mariadb_slave_capability = ' .. MARIA_SLAVE_CAPABILITY_GTID)
-  connection:query('SET @slave_connect_state = ' .. protocol.literal(options.state))
-  connection:query('SET @slave_gtid_strict_mode = 0')
-  connection:query('SET @slave_gtid_ignore_duplicates = 0')
-  connection:query(string.format('SET @master_heartbeat_period = %d', math.floor(options.heartbeat * 1e9)))
+  -- The variables of a replica and the checksum of the binlog in one round trip
+  local checksum = connection:value(string.format('SET @master_binlog_checksum = @@GLOBAL.binlog_checksum, ' ..
+    '@mariadb_slave_capability = %d, @slave_connect_state = %s, @slave_gtid_strict_mode = 0, ' ..
+    '@slave_gtid_ignore_duplicates = 0, @master_heartbeat_period = %d; SELECT @@GLOBAL.binlog_checksum',
+    MARIA_SLAVE_CAPABILITY_GTID, protocol.literal(options.state), math.floor(options.heartbeat * 1e9)))
   connection:command(string.char(COM_BINLOG_DUMP) .. protocol.u32(4) .. protocol.u16(0) .. protocol.u32(options.server))
   return string.upper(tostring(checksum)) == 'CRC32'
 end

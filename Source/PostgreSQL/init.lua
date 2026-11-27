@@ -146,8 +146,8 @@ function Session:position()
     ' LOGICAL pgoutput EXPORT_SNAPSHOT')
   local start, snapshot = rows[1][2], rows[1][3]
   self.loader = open(self.config, self.host, self.port, false)
-  self.loader:query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY')
-  self.loader:query('SET TRANSACTION SNAPSHOT ' .. protocol.literal(snapshot))
+  self.loader:query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY; SET TRANSACTION SNAPSHOT ' ..
+    protocol.literal(snapshot))
   return self.slot .. '/' .. start
 end
 
