@@ -244,6 +244,20 @@ compression, 0 zstd or 255 none, 3 the size before compression), then the
 payload: the events of the transaction one after another, without checksums
 of their own.
 
+### Tagged GTIDs of MySQL
+
+MySQL 8.3 and later has GTIDs with a tag, `uuid:tag:n`; a set prints the
+untagged intervals of a uuid first and then each tag with its intervals,
+`uuid:1-5:tag:1-3`. `GTID_TAGGED_LOG_EVENT` is in the serialization format of
+MySQL: a version byte, the size of the message and the id of its last field
+that cannot be ignored, then fields by their ids (0 flags, 1 the uuid, 16
+bytes as integers, 2 the gno, signed, 3 the tag as a length and bytes, and
+more not needed here), integers of variable length: the count of trailing
+ones of the first byte plus one is the count of bytes, the value above them.
+`COM_BINLOG_DUMP_GTID` takes a set with tags in the tagged format: the count
+of uuids as `1 << 56 | count << 8 | 1`, after each uuid its tag as a length and
+the bytes, an empty one for none.
+
 ### Row images and partial JSON
 
 A row image that is not `FULL` (`MINIMAL`, `NOBLOB`, `FULL_NODUP` of MariaDB)

@@ -411,6 +411,12 @@ local function stored_position(replica, key, target)
   ok(true, 'stored position %s', target)
 end
 
+-- A transaction of MySQL with the tag mftag, on a table nobody maps
+local function tagged(value)
+  exec("SET gtid_next = 'AUTOMATIC:mftag'", "INSERT INTO Registry.Other (Value) VALUES ('" .. value .. "')",
+    "SET gtid_next = 'AUTOMATIC'")
+end
+
 -- Each user of an authentication plugin logs in with the password, and not
 -- with a wrong one
 local function authentication()
@@ -588,6 +594,13 @@ local function load()
     item.replica:stop()
   end
 
+  -- A tagged GTID of MySQL 8.3 and later: the position takes the tag
+  if not MARIADB then
+    tagged('load')
+    caught_up(replica)
+    ok(string.find(replica:stat().position, ':mftag:', 1, true) ~= nil, 'tagged position %s', replica:stat().position)
+  end
+
   -- A node of Galera that leaves the cluster is left, and taken again when it is back
   if SERVER == 'galera' then
     if not THREAD then
@@ -617,6 +630,10 @@ local function resume()
   setup_spaces()
   -- Emptied while down: the table is loaded alone, without a full load
   box.space.GlobalGateways:truncate()
+  -- The stream asked for after a tagged position, with a tagged GTID after it
+  if not MARIADB then
+    tagged('resume')
+  end
   exec('USE Registry',
     "INSERT INTO Locations (ID, Node, Kind, Modified) SELECT seq, 5000, 'D', '2026-09-09 09:09:09' FROM " .. seq(201, 205),
     'DELETE FROM Locations WHERE ID = 101',

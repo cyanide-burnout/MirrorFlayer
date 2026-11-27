@@ -35,7 +35,6 @@ local LOST_POSITION = 1236
 -- Events that stop the replicator
 local UNSUPPORTED = {
   [E.ANONYMOUS_GTID] = 'transaction without GTID: the source needs gtid_mode=ON',
-  [E.GTID_TAGGED] = 'tagged GTIDs are not supported',
   [E.XA_PREPARE] = 'XA transactions are not supported'
 }
 
@@ -215,7 +214,7 @@ function Session:event(packet, inside)
     self.checksum = header.checksum == 1
   elseif type == E.HEARTBEAT or type == E.HEARTBEAT_V2 then
     self.handler:heartbeat()
-  elseif type == E.GTID or type == E.GTID_MYSQL then
+  elseif type == E.GTID or type == E.GTID_MYSQL or type == E.GTID_TAGGED then
     local transaction = self.dialect.gtid(header)
     if self.transaction ~= nil then
       self.handler:say('warn', 'transaction %s has no end, dropped', self.transaction.gtid)
