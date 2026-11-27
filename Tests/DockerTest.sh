@@ -17,6 +17,7 @@
 #                          binlog_row_image of the source (FULL by default,
 #                          FULL_NODUP is MariaDB only)
 #   PARTIAL_JSON=1         MySQL logs JSON updates as diffs (binlog_row_value_options)
+#   GTID=0                 MySQL without GTIDs: the position is a binlog file and offset
 #   CLEARTEXT=1            the PAM user of MariaDB logs in with mysql_clear_password
 #                          instead of dialog
 #
@@ -41,6 +42,7 @@ BINLOG_COMPRESS=${BINLOG_COMPRESS:-0}
 CLEARTEXT=${CLEARTEXT:-0}
 ROW_IMAGE=${ROW_IMAGE:-FULL}
 PARTIAL_JSON=${PARTIAL_JSON:-0}
+GTID=${GTID:-1}
 AUTH=
 THREAD=${THREAD:-0}
 TARANTOOL_IMAGE=${TARANTOOL_IMAGE:-tarantool/tarantool:3}
@@ -89,8 +91,12 @@ case "$SERVER" in
     if [ "$PARTIAL_JSON" = 1 ]; then
       COMPRESSION="$COMPRESSION --binlog-row-value-options=PARTIAL_JSON"
     fi
+    MODE="--gtid-mode=ON --enforce-gtid-consistency=ON"
+    if [ "$GTID" = 0 ]; then
+      MODE="--gtid-mode=OFF --enforce-gtid-consistency=OFF"
+    fi
     set -- -e MYSQL_ROOT_PASSWORD=root "$SERVER_IMAGE" \
-      --server-id=1 --gtid-mode=ON --enforce-gtid-consistency=ON --binlog-row-image=$ROW_IMAGE --binlog-checksum=CRC32 \
+      --server-id=1 $MODE --binlog-row-image=$ROW_IMAGE --binlog-checksum=CRC32 \
       $COMPRESSION
     ;;
   postgresql)
@@ -181,10 +187,10 @@ else
 fi
 
 phase() {
-  echo "=== phase $1 ($SERVER, TLS $TLS, thread $THREAD, compress $COMPRESS, binlog compress $BINLOG_COMPRESS, row image $ROW_IMAGE, partial JSON $PARTIAL_JSON)"
+  echo "=== phase $1 ($SERVER, TLS $TLS, thread $THREAD, compress $COMPRESS, binlog compress $BINLOG_COMPRESS, row image $ROW_IMAGE, partial JSON $PARTIAL_JSON, GTID $GTID)"
   docker run --rm --name "$TARANTOOL" --network "$NETWORK" \
     --user "$(id -u):$(id -g)" -e HOME=/tmp -e MIRRORFLAYER_DATA=/data \
-    -e SERVER="$SERVER" -e TLS="$TLS" -e THREAD="$THREAD" -e COMPRESS="$COMPRESS" -e AUTH="$AUTH" -e CLEARTEXT="$CLEARTEXT" -e SERVER_HOST="$DATABASE" \
+    -e SERVER="$SERVER" -e TLS="$TLS" -e THREAD="$THREAD" -e COMPRESS="$COMPRESS" -e GTID="$GTID" -e AUTH="$AUTH" -e CLEARTEXT="$CLEARTEXT" -e SERVER_HOST="$DATABASE" \
     -v "$SOURCE:/src:ro" -v "$WORK/$2:/data" -v "$WORK/certs:/certs:ro" -w /src \
     -v "$SOURCE/Source:/usr/share/tarantool/MirrorFlayer:ro" \
     -v "$SOURCE/Source:/usr/lib/x86_64-linux-gnu/tarantool/MirrorFlayer:ro" \
@@ -197,4 +203,4 @@ phase load data
 phase resume data
 phase purge data
 phase late late
-echo "all phases passed ($SERVER_IMAGE, TLS $TLS, thread $THREAD, compress $COMPRESS, binlog compress $BINLOG_COMPRESS, row image $ROW_IMAGE, partial JSON $PARTIAL_JSON)"
+echo "all phases passed ($SERVER_IMAGE, TLS $TLS, thread $THREAD, compress $COMPRESS, binlog compress $BINLOG_COMPRESS, row image $ROW_IMAGE, partial JSON $PARTIAL_JSON, GTID $GTID)"

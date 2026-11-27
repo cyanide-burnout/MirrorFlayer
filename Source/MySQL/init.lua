@@ -23,19 +23,15 @@ local column   = require('MirrorFlayer.MySQL.Column')
 local binlog   = require('MirrorFlayer.MySQL.BinLog')
 local mariadb  = require('MirrorFlayer.MySQL.MariaDB')
 local gtid     = require('MirrorFlayer.MySQL.GTID')
+local file     = require('MirrorFlayer.MySQL.File')
 local errors   = require('MirrorFlayer.Failure')
 
 local E = binlog.E
 
-local failure, fatal = errors.failure, errors.fatal
+local failure = errors.failure
 
 -- The binlog no longer has the position asked for
 local LOST_POSITION = 1236
-
--- Events that stop the replicator
-local UNSUPPORTED = {
-  [E.ANONYMOUS_GTID] = 'transaction without GTID: the source needs gtid_mode=ON',
-}
 
 local Session   = {}
 Session.__index = Session
@@ -88,9 +84,13 @@ local function connect(config, host, port)
     public_key = config.public_key,
     compress   = config.compress
   })
-  local status, galera = pcall(function ()
+  local status, galera, mode = pcall(function ()
     connection:query("SET time_zone = '+00:00'")
-    return ready(connection)
+    local cluster = ready(connection)
+    if connection.mariadb then
+      return cluster
+    end
+    return cluster, string.upper(tostring(connection:value('SELECT @@GLOBAL.gtid_mode')))
   end)
   if not status then
     connection:close()
@@ -106,7 +106,8 @@ local function connect(config, host, port)
     secure     = connection.secure == true,
     compressed = connection.compressed == true,
     algorithm  = connection.algorithm,
-    dialect    = connection.mariadb and mariadb or gtid
+    -- GTIDs of MariaDB, of MySQL with gtid_mode=ON, binlog files and offsets otherwise
+    dialect    = connection.mariadb and mariadb or (mode == 'ON' and gtid or file)
   }, Session)
 end
 
@@ -200,7 +201,7 @@ function Session:commit(header, xid)
   if transaction == nil then
     return
   end
-  self.dialect.add(self.state, transaction)
+  self.dialect.add(self.state, transaction, header)
   self.handler:commit(transaction.changes, self.dialect.format(self.state), header.timestamp, xid)
 end
 
@@ -212,7 +213,7 @@ function Session:prepare(header, xid)
   if transaction == nil then
     return
   end
-  self.dialect.add(self.state, transaction)
+  self.dialect.add(self.state, transaction, header)
   self.handler:prepare(xid, transaction.packets, self.dialect.format(self.state), header.timestamp)
 end
 
@@ -253,7 +254,12 @@ function Session:event(packet, inside)
     self.checksum = header.checksum == 1
   elseif type == E.HEARTBEAT or type == E.HEARTBEAT_V2 then
     self.handler:heartbeat()
-  elseif type == E.GTID or type == E.GTID_MYSQL or type == E.GTID_TAGGED then
+  elseif type == E.ROTATE then
+    -- The next binlog file: the position of the dialect of files
+    if self.dialect.rotate ~= nil then
+      self.dialect.rotate(self.state, binlog.rotate(header))
+    end
+  elseif type == E.GTID or type == E.GTID_MYSQL or type == E.GTID_TAGGED or type == E.ANONYMOUS_GTID then
     local transaction = self.dialect.gtid(header)
     if self.transaction ~= nil then
       self.handler:say('warn', 'transaction %s has no end, dropped', self.transaction.gtid)
@@ -353,10 +359,8 @@ function Session:event(packet, inside)
       end
       self:commit(header)
     end
-  elseif UNSUPPORTED[type] ~= nil then
-    fatal('%s', UNSUPPORTED[type])
   end
-  -- ROTATE, STOP, GTID_LIST, BINLOG_CHECKPOINT, ANNOTATE_ROWS, ROWS_QUERY,
+  -- STOP, GTID_LIST, BINLOG_CHECKPOINT, ANNOTATE_ROWS, ROWS_QUERY,
   -- PREVIOUS_GTIDS, TRANSACTION_CONTEXT, VIEW_CHANGE need nothing
 end
 

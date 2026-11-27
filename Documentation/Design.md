@@ -265,6 +265,17 @@ and commits the changes, deleting the record in the same box transaction;
 position of a full load is not in the snapshot and has no record: its commit
 is logged and has no changes.
 
+### Binlog files of MySQL without GTIDs
+
+With `gtid_mode` other than `ON` the driver takes `MirrorFlayer.MySQL.File`:
+the position is `file:<server_uuid>:<file>:<offset>`, the full load starts at
+`SHOW BINARY LOG STATUS` (`SHOW MASTER STATUS` before 8.4), the stream comes
+from `COM_BINLOG_DUMP` with the file and the offset. `ANONYMOUS_GTID` and
+`GTID` events begin transactions; a transaction ends at the end of its last
+event, the position of the event after it; `ROTATE` gives the next file. The
+files and offsets are those of one server: a position of another server
+(after the next of `hosts`) means a full load.
+
 ### Tagged GTIDs of MySQL
 
 MySQL 8.3 and later has GTIDs with a tag, `uuid:tag:n`; a set prints the

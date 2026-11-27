@@ -25,8 +25,12 @@ Internals and OpenSSL findings are in
 
 Requires Tarantool 3.x and
 
-* MySQL or MariaDB with `log_bin`, `binlog_format=ROW` and GTIDs: always
-  there in MariaDB, `gtid_mode=ON` in MySQL. Any `binlog_row_image` (`FULL`,
+* MySQL or MariaDB with `log_bin` and `binlog_format=ROW`. The position is
+  a GTID state: always there in MariaDB, `gtid_mode=ON` in MySQL; MySQL
+  without GTIDs gives a binlog file and offset of its server
+  (`file:<server_uuid>:<file>:<offset>`), which another host of `hosts` does
+  not have: switching to it means a full load. Tagged GTIDs of MySQL 8.3 and
+  XA transactions are followed. Any `binlog_row_image` (`FULL`,
   `MINIMAL`, `NOBLOB`, `FULL_NODUP` of MariaDB) and the partial JSON updates
   of MySQL (`binlog_row_value_options=PARTIAL_JSON`) are read: a column a row
   image lacks keeps the value the target space has, a JSON diff is applied to

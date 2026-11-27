@@ -26,6 +26,8 @@ local HOST   = os.getenv('SERVER_HOST') or 'mirrorflayer-server'
 local SERVER = os.getenv('SERVER') or 'mariadb'
 local TLS    = os.getenv('TLS') or 'off'
 local COMPRESS = os.getenv('COMPRESS') ~= '0'
+-- GTID=0: MySQL without GTIDs, the position is file:<server_uuid>:<file>:<offset>
+local GTID     = os.getenv('GTID') ~= '0'
 
 -- Users of the authentication plugins of MariaDB made by Tests/DockerTest.sh
 local AUTH    = os.getenv('AUTH') or ''
@@ -109,6 +111,10 @@ exec("SET time_zone = '+00:00'")
 
 -- Binlog position of the source as the replicator prints it
 local function gtid()
+  if SERVER == 'mysql' and not GTID then
+    local _, rows = sql:query('SHOW BINARY LOG STATUS')
+    return string.format('file:%s:%s:%s', string.lower(sql:value('SELECT @@GLOBAL.server_uuid')), rows[1][1], rows[1][2])
+  end
   local query = SERVER == 'mysql' and 'SELECT @@GLOBAL.gtid_executed' or 'SELECT @@GLOBAL.gtid_binlog_pos'
   return (string.gsub(sql:value(query), '%s', ''))
 end
@@ -623,7 +629,7 @@ local function load()
   end
 
   -- A tagged GTID of MySQL 8.3 and later: the position takes the tag
-  if not MARIADB then
+  if not MARIADB and GTID then
     tagged('load')
     caught_up(replica)
     ok(string.find(replica:stat().position, ':mftag:', 1, true) ~= nil, 'tagged position %s', replica:stat().position)
@@ -659,7 +665,7 @@ local function resume()
   -- Emptied while down: the table is loaded alone, without a full load
   box.space.GlobalGateways:truncate()
   -- The stream asked for after a tagged position, with a tagged GTID after it
-  if not MARIADB then
+  if not MARIADB and GTID then
     tagged('resume')
   end
   exec('USE Registry',
