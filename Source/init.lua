@@ -304,6 +304,36 @@ function Replica:advance(state)
   end
 end
 
+-- Prepared XA transactions wait for their decision in the space named after
+-- the position space with XA, { key, xid, events }
+function Replica:waiting(create)
+  if self.xa == nil then
+    self.xa = store.prepared(self.config.position .. 'XA', self.config.key, create)
+  end
+  return self.xa
+end
+
+-- XA PREPARE: the events of the transaction are kept with the position in one
+-- box transaction, they are applied by its XA COMMIT
+function Replica:prepare(xid, events, state, event_time)
+  local stats      = self.stats
+  local waiting    = self:waiting(true)
+  stats.position   = state
+  stats.event_time = event_time
+  store.transaction(function ()
+    waiting:put(xid, events)
+    self.positions:put(state, event_time)
+  end)
+  self.dirty         = false
+  self.stored        = clock.time()
+  stats.applied_time = self.stored
+end
+
+function Replica:prepared(xid)
+  local waiting = self:waiting(false)
+  return waiting and waiting:get(xid)
+end
+
 function Replica:heartbeat()
   self.stats.heartbeat_time = clock.time()
   self.stats.lag            = 0
@@ -315,11 +345,11 @@ end
 -- the position last (counted in split). Transactions without changes only
 -- move the position, which is written at most once a second. A change is
 -- { table id, operation, old, new }
-function Replica:commit(changes, state, event_time)
+function Replica:commit(changes, state, event_time, xid)
   local stats      = self.stats
   stats.position   = state
   stats.event_time = event_time
-  if #changes == 0 then
+  if #changes == 0 and xid == nil then
     self.dirty = true
     if clock.time() - (self.stored or 0) >= 1 then
       self:flush()
@@ -332,10 +362,14 @@ function Replica:commit(changes, state, event_time)
       table.insert(statements, { target, change[2], change[3], change[4] })
     end
   end
-  local atomic = store.apply(statements, function (item)
+  local waiting = xid ~= nil and self:waiting(false) or nil
+  local atomic  = store.apply(statements, function (item)
     item[1]:apply(item[2], item[3], item[4])
   end, function ()
     self.positions:put(state, event_time)
+    if waiting ~= nil then
+      waiting:delete(xid)
+    end
   end)
   if not atomic then
     stats.split = stats.split + 1

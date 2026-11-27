@@ -408,7 +408,39 @@ function Position:put(state, time)
   self.space:replace({ self.key, state, time or 0, self.kind })
 end
 
+-- Prepared XA transactions of the source: { key, xid, events } in a space of
+-- their own, made when the first one comes; nil without it when not create
+local Prepared   = {}
+Prepared.__index = Prepared
+
+local function prepared(space_name, key, create)
+  local space = box.space[space_name]
+  if space == nil then
+    if not create then
+      return nil
+    end
+    space = box.schema.space.create(space_name, { if_not_exists = true })
+    space:create_index('ID', { if_not_exists = true, unique = true,
+      parts = { 1, type(key) == 'number' and 'unsigned' or 'string', 2, 'string' } })
+  end
+  return setmetatable({ space = space, key = key }, Prepared)
+end
+
+function Prepared:put(xid, events)
+  self.space:replace({ self.key, xid, events })
+end
+
+function Prepared:get(xid)
+  local tuple = self.space:get({ self.key, xid })
+  return tuple and tuple[3]
+end
+
+function Prepared:delete(xid)
+  self.space:delete({ self.key, xid })
+end
+
 return {
+  prepared    = prepared,
   target      = target,
   load        = load,
   transaction = transaction,

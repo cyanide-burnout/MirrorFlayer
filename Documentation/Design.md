@@ -244,6 +244,27 @@ compression, 0 zstd or 255 none, 3 the size before compression), then the
 payload: the events of the transaction one after another, without checksums
 of their own.
 
+### XA transactions
+
+MySQL and MariaDB log an XA transaction as its changes between `XA START`
+(a query of MySQL, a flag of the GTID event of MariaDB) and `XA END`, ended by
+`XA_PREPARE_LOG_EVENT` (one phase, the format id, gtrid and bqual); the
+decision comes later as a transaction of its own, the query `XA COMMIT` or
+`XA ROLLBACK X'gtrid',X'bqual',format`. `XA COMMIT ... ONE PHASE` is the
+prepare event with one phase set in MySQL and an ordinary transaction in
+MariaDB.
+
+The driver keeps the TABLE_MAP and rows events of every transaction. At the
+prepare of two phases they go to the engine instead of the changes:
+`prepare(xid, events, position)` writes them into the space named after the
+position space with `XA` (`ReplicatorPositionsXA`, `{ key, xid, events }`,
+made with the first one) in the box transaction of the position. `XA COMMIT`
+takes them back (`prepared(xid)`), runs them through the decoder as they came
+and commits the changes, deleting the record in the same box transaction;
+`XA ROLLBACK` deletes it with the position. A transaction prepared before the
+position of a full load is not in the snapshot and has no record: its commit
+is logged and has no changes.
+
 ### Tagged GTIDs of MySQL
 
 MySQL 8.3 and later has GTIDs with a tag, `uuid:tag:n`; a set prints the

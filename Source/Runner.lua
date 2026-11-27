@@ -18,7 +18,12 @@
 --   filled()                        a table was loaded alone
 --   resume(state)                   the stream starts at the position
 --   started()                       the source streams
---   commit(changes, state, time)    a transaction: { id, operation, old, new }
+--   commit(changes, state, time, xid)
+--                                   a transaction: { id, operation, old, new }; xid
+--                                   the prepared XA transaction it decides
+--   prepare(xid, events, state, time)
+--                                   an XA transaction prepared, its events wait
+--   prepared(xid)                   the events of a prepared XA transaction or nil
 --   advance(state)                  the position moves without changes
 --   heartbeat()                     the source is there
 --   report(fields)                  status, error, host, port, tls, compressed
@@ -159,12 +164,20 @@ function Runner:advance(state)
 end
 
 -- Changes go to the sink by the id of their table
-function Runner:commit(changes, state, event_time)
+function Runner:commit(changes, state, event_time, xid)
   local items = {}
   for index, change in ipairs(changes) do
     items[index] = { change[1].id, change[2], change[3], change[4] }
   end
-  self.sink:commit(items, state, event_time)
+  self.sink:commit(items, state, event_time, xid)
+end
+
+function Runner:prepare(xid, events, state, event_time)
+  self.sink:prepare(xid, events, state, event_time)
+end
+
+function Runner:prepared(xid)
+  return self.sink:prepared(xid)
 end
 
 -- Session and loop -----------------------------------------------------------------

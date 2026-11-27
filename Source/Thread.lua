@@ -91,7 +91,7 @@ end
 
 local function remote(name)
   local sink = {
-    commit = function (_, changes, state, event_time)
+    commit = function (_, changes, state, event_time, xid)
       for _, change in ipairs(changes) do
         local old, new = change[3], change[4]
         -- old and new may be one table (an update that kept the key)
@@ -101,7 +101,7 @@ local function remote(name)
         change[3] = old or NULL
         change[4] = new or NULL
       end
-      return call(name, 'commit', changes, state, event_time)
+      return call(name, 'commit', changes, state, event_time, xid)
     end
   }
   return setmetatable(sink, {

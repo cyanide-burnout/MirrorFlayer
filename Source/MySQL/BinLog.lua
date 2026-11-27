@@ -139,6 +139,24 @@ local function payload(header)
   return events
 end
 
+-- XA_PREPARE_LOG_EVENT of MySQL and MariaDB: one phase (XA COMMIT ... ONE
+-- PHASE), the format id, the lengths of gtrid and bqual, then both. Returns
+-- one phase and the xid as the servers print it in XA COMMIT and XA ROLLBACK,
+-- X'gtrid',X'bqual',format
+local function xa_prepare(header)
+  local data      = header.data
+  local one_phase = data:u8() ~= 0
+  local format_id = data:int(4)
+  local gtrid     = data:u32()
+  local bqual     = data:u32()
+  local function hex(raw)
+    return (string.gsub(raw, '.', function (octet) return string.format('%02X', string.byte(octet)) end))
+  end
+  gtrid = data:bytes(gtrid)
+  bqual = data:bytes(bqual)
+  return one_phase, string.format("X'%s',X'%s',%d", hex(gtrid), hex(bqual), format_id)
+end
+
 -- Events ---------------------------------------------------------------------
 
 -- Parses an event of the dump stream. packet is the payload after the 0x00
@@ -354,6 +372,7 @@ return {
   xid        = xid,
   table_map  = table_map,
   payload    = payload,
+  xa_prepare = xa_prepare,
   rows_table = rows_table,
   rows       = rows
 }

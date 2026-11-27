@@ -35,7 +35,6 @@ local LOST_POSITION = 1236
 -- Events that stop the replicator
 local UNSUPPORTED = {
   [E.ANONYMOUS_GTID] = 'transaction without GTID: the source needs gtid_mode=ON',
-  [E.XA_PREPARE] = 'XA transactions are not supported'
 }
 
 local Session   = {}
@@ -193,15 +192,50 @@ function Session:truncates(text)
   return false
 end
 
--- Hands a finished transaction to the engine with its position
-function Session:commit(header)
+-- Hands a finished transaction to the engine with its position; xid tells
+-- the prepared XA transaction it decides
+function Session:commit(header, xid)
   local transaction = self.transaction
   self.transaction  = nil
   if transaction == nil then
     return
   end
   self.dialect.add(self.state, transaction)
-  self.handler:commit(transaction.changes, self.dialect.format(self.state), header.timestamp)
+  self.handler:commit(transaction.changes, self.dialect.format(self.state), header.timestamp, xid)
+end
+
+-- XA PREPARE: the transaction is not applied, its events wait in the engine
+-- for XA COMMIT or XA ROLLBACK, the position moves on
+function Session:prepare(header, xid)
+  local transaction = self.transaction
+  self.transaction  = nil
+  if transaction == nil then
+    return
+  end
+  self.dialect.add(self.state, transaction)
+  self.handler:prepare(xid, transaction.packets, self.dialect.format(self.state), header.timestamp)
+end
+
+-- XA COMMIT and XA ROLLBACK, in a transaction of their own: COMMIT applies the
+-- events of the prepared transaction as they came, both drop it
+function Session:resolve(header, decision, xid)
+  local transaction = self.transaction
+  if transaction == nil then
+    return
+  end
+  transaction.standalone = false
+  if decision == 'COMMIT' then
+    local packets = self.handler:prepared(xid)
+    if packets == nil then
+      self.handler:say('warn', 'XA COMMIT %s without its prepared transaction: it was prepared before the ' ..
+        'position (a full load in between), its changes were not seen', xid)
+    else
+      for _, item in ipairs(packets) do
+        self:event(item[1], item[2])
+      end
+    end
+  end
+  self:commit(header, xid)
 end
 
 -- An event of the stream; inside is an event of a compressed transaction of
@@ -209,6 +243,11 @@ end
 function Session:event(packet, inside)
   local header = binlog.event(packet, self.checksum and not inside)
   local type   = header.type
+
+  -- The events of the changes, kept with the transaction for XA PREPARE
+  if self.transaction ~= nil and (type == E.TABLE_MAP or binlog.ROWS[type] ~= nil) then
+    table.insert(self.transaction.packets, { packet, inside == true })
+  end
 
   if type == E.FORMAT_DESCRIPTION then
     self.checksum = header.checksum == 1
@@ -220,6 +259,7 @@ function Session:event(packet, inside)
       self.handler:say('warn', 'transaction %s has no end, dropped', self.transaction.gtid)
     end
     transaction.changes = {}
+    transaction.packets = {}
     self.transaction    = transaction
   elseif type == E.TABLE_MAP then
     local map    = binlog.table_map(header)
@@ -258,11 +298,34 @@ function Session:event(packet, inside)
     for _, packet in ipairs(binlog.payload(header)) do
       self:event(packet, true)
     end
+  elseif type == E.XA_PREPARE then
+    local one_phase, xid = binlog.xa_prepare(header)
+    if one_phase then
+      self:commit(header)
+    else
+      self:prepare(header, xid)
+    end
   elseif type == E.XID then
     self:commit(header)
   elseif type == E.QUERY or type == E.QUERY_COMPRESSED then
     local query = binlog.query(header)
     local text  = statement(query.query)
+    -- XA START and XA END frame the changes of an XA transaction; XA COMMIT
+    -- and XA ROLLBACK X'gtrid',X'bqual',format decide a prepared one
+    if string.match(text, '^XA%s+START') or string.match(text, '^XA%s+END') then
+      if self.transaction ~= nil then
+        self.transaction.standalone = false
+      end
+      return
+    end
+    local decision, xid = string.match(text, '^XA%s+(COMMIT)%s+(.-)$')
+    if decision == nil then
+      decision, xid = string.match(text, '^XA%s+(ROLLBACK)%s+(.-)$')
+    end
+    if decision ~= nil then
+      self:resolve(header, decision, (string.gsub(xid, '%s', '')))
+      return
+    end
     if text == 'BEGIN' then
       if self.transaction ~= nil then
         self.transaction.standalone = false

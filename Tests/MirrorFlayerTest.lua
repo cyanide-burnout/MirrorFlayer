@@ -256,6 +256,7 @@ local function setup_server()
       'SSID TINYINT UNSIGNED, Text VARCHAR(100))',
     'CREATE TABLE Gateways (BMC INT UNSIGNED, TPC INT UNSIGNED, Comment VARCHAR(20), PRIMARY KEY (BMC, TPC))',
     'CREATE TABLE Other (ID INT PRIMARY KEY AUTO_INCREMENT, Value VARCHAR(20))',
+    'CREATE TABLE Xa (ID INT UNSIGNED PRIMARY KEY, Value VARCHAR(20))',
     'CREATE TABLE Digits (D INT PRIMARY KEY)',
     'INSERT INTO Digits VALUES (0), (1), (2), (3), (4), (5), (6), (7), (8), (9)',
     'CREATE TABLE Types (' .. table.concat(columns, ', ') .. ')',
@@ -278,6 +279,9 @@ local function setup_spaces()
     { name = 'SSID', type = 'unsigned', is_nullable = true } } })
   box.space.GlobalProfiles:create_index('ID', { if_not_exists = true, parts = { 1, 'unsigned' } })
   box.space.GlobalProfiles:create_index('Call', { if_not_exists = true, unique = false, parts = { 2, 'string' } })
+
+  box.schema.space.create('GlobalXa', { if_not_exists = true })
+  box.space.GlobalXa:create_index('ID', { if_not_exists = true, parts = { 1, 'unsigned' } })
 
   box.schema.space.create('GlobalGateways', { if_not_exists = true })
   box.space.GlobalGateways:create_index('Gateway', { if_not_exists = true, parts = { 1, 'unsigned', 2, 'unsigned' } })
@@ -325,6 +329,7 @@ local function replicator(only_locations)
     replica:map('Registry', 'Users', 'GlobalProfiles')
     replica:map('Registry', 'Gateways', 'GlobalGateways', { 'BMC', 'TPC', 'Comment' })
     replica:map('Registry', 'Types', 'Types')
+    replica:map('Registry', 'Xa', 'GlobalXa', { 'ID', 'Value' })
   end
   if box.space.GlobalLocations ~= nil then
     box.space.GlobalLocations:on_replace(function ()
@@ -594,6 +599,29 @@ local function load()
     item.replica:stop()
   end
 
+  -- XA: a prepared transaction waits for its decision; x4 stays prepared for
+  -- the resume, the replicator restarts in between (Galera has no XA)
+  if SERVER ~= 'galera' then
+    exec("XA START 'x1'", "INSERT INTO Registry.Xa VALUES (1, 'one')", "XA END 'x1'", "XA PREPARE 'x1'")
+    caught_up(replica)
+    ok(box.space.GlobalXa:get(1) == nil, 'XA: prepared, not applied')
+    exec("XA COMMIT 'x1'")
+    caught_up(replica)
+    ok(box.space.GlobalXa:get(1) ~= nil and box.space.GlobalXa:get(1)[2] == 'one', 'XA: applied by XA COMMIT')
+    exec("XA START 'x2','b2',7", "INSERT INTO Registry.Xa VALUES (2, 'two')", "XA END 'x2','b2',7",
+      "XA PREPARE 'x2','b2',7", "XA ROLLBACK 'x2','b2',7")
+    caught_up(replica)
+    ok(box.space.GlobalXa:get(2) == nil, 'XA: dropped by XA ROLLBACK')
+    exec("XA START 'x3'", "INSERT INTO Registry.Xa VALUES (3, 'three')", "XA END 'x3'", "XA COMMIT 'x3' ONE PHASE")
+    caught_up(replica)
+    ok(box.space.GlobalXa:get(3) ~= nil, 'XA: one phase')
+    exec("XA START 'x4'", "UPDATE Registry.Xa SET Value = 'uno' WHERE ID = 1", "INSERT INTO Registry.Xa VALUES (4, 'four')",
+      "XA END 'x4'", "XA PREPARE 'x4'")
+    caught_up(replica)
+    ok(box.space.GlobalXa:get(4) == nil and box.space.ReplicatorPositionsXA:count() == 1,
+      'XA: x4 prepared and kept for the resume')
+  end
+
   -- A tagged GTID of MySQL 8.3 and later: the position takes the tag
   if not MARIADB then
     tagged('load')
@@ -641,6 +669,13 @@ local function resume()
   local replica = replicator()
   caught_up(replica)
   ok(replica:stat().loads == 0 and journal.reset == 0, 'continued from the stored GTID without a full load')
+  -- x4, prepared before the restart, decided now
+  if SERVER ~= 'galera' then
+    exec("XA COMMIT 'x4'")
+    caught_up(replica)
+    ok(box.space.GlobalXa:get(4) ~= nil and box.space.GlobalXa:get(1)[2] == 'uno' and
+      box.space.ReplicatorPositionsXA:count() == 0, 'XA: x4 prepared before the restart applied by XA COMMIT')
+  end
   ok(replica:stat().fills == 1 and box.space.GlobalGateways:count() == 3,
     'the emptied GlobalGateways was loaded alone (%d fills, %d rows)', replica:stat().fills, box.space.GlobalGateways:count())
   ok(journal.insert == 5 and journal.delete == 1 and journal.update == 1, 'only the changes made while down were applied')
