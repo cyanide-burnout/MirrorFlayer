@@ -28,6 +28,7 @@ local DEFAULTS = {
   name      = 'MirrorFlayer',
   position  = 'ReplicatorPositions',
   tls       = false,
+  compress  = true,
   datetime  = 'datetime',
   json      = 'map',
   uuid      = 'uuid',
@@ -62,7 +63,8 @@ end
 -- MariaDB), database, slot and publication (of PostgreSQL), tls (false, true
 -- or { verify = 'none' | 'ca' | 'identity', ca, cert, key }), public_key (PEM
 -- of the source for caching_sha2_password without TLS, asked from the server
--- when missing), position (space name), key (of the position, the server id
+-- when missing), compress (the compressed protocol of MySQL and MariaDB when
+-- the server has it, true by default), position (space name), key (of the position, the server id
 -- of MySQL or the slot of PostgreSQL by default), name (in logs and metrics),
 -- datetime ('datetime' or 'number'), json ('map' or 'string'), uuid ('uuid',
 -- 'binary' or 'string'), heartbeat (seconds), check (seconds between checks
@@ -108,6 +110,7 @@ local function new(config)
     options.tls = nil
   end
   check(options.public_key == nil or type(options.public_key) == 'string', 'config.public_key must be a PEM string')
+  check(type(options.compress) == 'boolean', 'config.compress must be a boolean')
   if options.key == nil then
     options.key = driver.key(options)
   end
@@ -262,7 +265,7 @@ function Replica:report(fields)
     self.host, self.port = fields.host, fields.port
   end
   if fields.tls ~= nil then
-    self.stats.tls = fields.tls
+    self.stats.tls, self.stats.compressed = fields.tls, fields.compressed
   end
 end
 
@@ -474,6 +477,7 @@ function Replica:stat()
     loads          = stats.loads,
     fills          = stats.fills,
     tls            = stats.tls,
+    compressed     = stats.compressed,
     split          = stats.split,
     aborts         = store.aborts(),
     error          = stats.error

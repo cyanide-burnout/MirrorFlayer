@@ -32,8 +32,9 @@ Usage and values are in the [README](../README.md).
 * **Errors.** 1236 (the position is no longer in the binlog) → full load.
   Network and server errors → reconnect to the next host after `retry`
   seconds. A row image that is not FULL (`binlog_row_image` must be `FULL`),
-  compressed events or transactions, anonymous or tagged GTIDs, partial JSON
-  updates, XA, a missing `MirrorFlayer.TLS` when TLS is asked for and
+  transactions compressed by MySQL (zstd), anonymous or tagged GTIDs, partial
+  JSON updates, XA, a missing `MirrorFlayer.Support` when TLS is asked for or
+  a compressed event of MariaDB comes, and
   unsupported column types stop the replicator with an error in
   `stat().error` and the log.
 * **Metrics.** `stat()` returns `event_time` (source time of the last applied
@@ -83,7 +84,7 @@ installed as `MirrorFlayer/MySQL/`, its `init.lua` being the driver itself.
 | `MirrorFlayer.Column` | values in their Tarantool types, datetime and json modes |
 | `MirrorFlayer.Store` | targets, pacing of writes, full load, position |
 | `MirrorFlayer.Transport` | `read(n)`/`write(s)`/`close()`; plain TCP over the Tarantool `socket`, `secure()` moves it onto TLS |
-| `MirrorFlayer.TLS` (`Source/TLS.c` → `TLS.so`) | TLS over the already connected descriptor, RSA-OAEP for `caching_sha2_password` and `sha256_password` |
+| `MirrorFlayer.Support` (`Source/Support.c` → `Support.so`, `TLS.so` up to 2.2) | TLS over the already connected descriptor, RSA-OAEP for `caching_sha2_password` and `sha256_password`, inflate (zlib) for the compressed protocol and the compressed events of MariaDB |
 | `MirrorFlayer.MySQL` (`Source/MySQL/init.lua`) | the driver of MySQL and MariaDB: session, columns, snapshot, binlog stream and its events |
 | `MirrorFlayer.MySQL.Protocol` | packets, greeting, SSL Request, authentication, `COM_QUERY` with a streamed text result |
 | `MirrorFlayer.MySQL.MariaDB` | MariaDB dialect: GTID state, GTID event, `COM_BINLOG_DUMP` after `@slave_connect_state` |
@@ -164,15 +165,14 @@ COM_BINLOG_DUMP_GTID (flags BINLOG_THROUGH_GTID, server id, no file name, positi
 ### TLS
 
 MySQL starts TLS after the greeting on the same TCP connection (SSL Request
-packet), so `MirrorFlayer.TLS` takes over the descriptor of the connected
+packet), so `MirrorFlayer.Support` takes over the descriptor of the connected
 Tarantool socket (`sock:fd()`, `SSL_set_fd`), stays non-blocking and waits with
 `coio_wait()` on `SSL_ERROR_WANT_READ`/`WANT_WRITE`. It also provides RSA-OAEP
 for `caching_sha2_password` without TLS. It is built by the Makefile unless
-`TLS=0`. `verify` is `none` (encryption only, MySQL `ssl-mode=REQUIRED`),
+`SUPPORT=0`. `verify` is `none` (encryption only, MySQL `ssl-mode=REQUIRED`),
 `ca` (`VERIFY_CA`) or `identity` (`VERIFY_IDENTITY`, `SSL_set1_host`); SNI is
 sent for host names. Timeouts are deadlines over the whole read or write,
-and a cancelled fiber stops waiting. C rules: short-lived buffers on the stack or from the caller, no
-`malloc`/`strdup`; locals at the top of a function.
+and a cancelled fiber stops waiting.
 
 #### OpenSSL in the tarantool binary
 
@@ -211,11 +211,30 @@ Consequences for `tls.so`:
   embedded curl) stays on the embedded copy.
 * Alternative: link OpenSSL statically into `tls.so` with hidden visibility
   (`-Wl,--exclude-libs,ALL`), so the module does not depend on the system
-  libssl version. `TLS.so` links the system library: the simpler default for
+  libssl version. `Support.so` (`TLS.so` then) links the system library: the simpler default for
   a Debian package (`Depends: libssl3t64`).
 * A Tarantool built against the system OpenSSL (e.g. distribution packages)
   would export the `SSL_*` symbols; `tls.so` linked with the same system
   library then shares that single copy, which is also fine.
+
+### Compression
+
+MySQL and MariaDB: with `CLIENT_COMPRESS` in the handshake response, packets
+go in frames after the authentication OK (as libmariadb and libmysqlclient
+switch): 3 bytes of the length, a sequence of the frames (reset with each
+command, as the packet sequence), 3 bytes of the length before compression,
+0 when the frame is stored as it is. A frame carries packets or a part of
+one. The server compresses frames of 50 bytes and more with `compress()` of
+zlib; the replicator sends its frames uncompressed, so it only inflates. zstd
+(`CLIENT_ZSTD_COMPRESSION_ALGORITHM`) is MySQL 8.0.18 and later only, not
+MariaDB, and is not used. PostgreSQL has no compression in its protocol
+(the libpq patch was never merged, `sslcompression` is gone since 14).
+
+MariaDB with `log_bin_compress` writes `QUERY_COMPRESSED` (the query text is
+compressed) and `WRITE/UPDATE/DELETE_ROWS_COMPRESSED(_V1)` (the rows after the
+column bitmaps are compressed): a header byte `0x80 | algorithm << 4 |
+count of length bytes`, the length before compression big-endian, then zlib
+(algorithm 0, the only one). The checksum covers the event as written.
 
 ## Plan
 

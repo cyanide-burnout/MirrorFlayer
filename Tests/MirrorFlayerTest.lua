@@ -1,6 +1,7 @@
 #!/usr/bin/env tarantool
 -- Docker test of MirrorFlayer against MariaDB, a node of MariaDB Galera or
--- MySQL (SERVER), with or without TLS (TLS = off | on | ca), driven by
+-- MySQL (SERVER), with or without TLS (TLS = off | on | ca), compressed
+-- unless COMPRESS=0, driven by
 -- Tests/DockerTest.sh:
 --   load    full load, values of all types, INSERT/UPDATE/DELETE over the stream
 --   resume  restart continues from the stored GTID without a full load, a
@@ -24,6 +25,7 @@ local phase  = arg[1]
 local HOST   = os.getenv('SERVER_HOST') or 'mirrorflayer-server'
 local SERVER = os.getenv('SERVER') or 'mariadb'
 local TLS    = os.getenv('TLS') or 'off'
+local COMPRESS = os.getenv('COMPRESS') ~= '0'
 
 -- MariaDB alone or a node of Galera
 local MARIADB = SERVER ~= 'mysql'
@@ -307,7 +309,7 @@ local function replicator(only_locations)
     hosts = { 'mirrorflayer-nowhere:3306', HOST .. ':3306' },
     user = 'replica', password = 'secret', server = KEY,
     heartbeat = 1, retry = 1, batch = 500, check = 1,
-    tls = (TLS == 'on' and true) or (TLS == 'ca' and { ca = '/certs/ca.pem' }) or false
+    tls = (TLS == 'on' and true) or (TLS == 'ca' and { ca = '/certs/ca.pem' }) or false, compress = COMPRESS
   }))
   replica:map('Registry', 'Locations', 'GlobalLocations', { 'ID', 'Node', 'Kind', 'Link', 'Slot', 'Modified' })
   if not only_locations then
@@ -414,6 +416,8 @@ local function load()
 
   ok(replica:stat().loads == 1, 'one full load')
   ok(replica:stat().tls == (TLS ~= 'off'), 'TLS %s, connection %s', TLS, replica:stat().tls and 'encrypted' or 'plain')
+  ok(replica:stat().compressed == COMPRESS, 'compress %s, connection %s', tostring(COMPRESS),
+    replica:stat().compressed and 'compressed' or 'not compressed')
   locations_equal('load')
   ok(box.space.GlobalProfiles:count() == 20000, 'GlobalProfiles has 20000 rows')
   ok(encode(box.space.GlobalProfiles:get(5)) == encode({ 5, 'C5', 1, 5 }), 'GlobalProfiles columns follow the space format')
@@ -494,7 +498,7 @@ local function load()
     local other = MirrorFlayer.new(threaded({
       hosts = { HOST .. ':3306' }, user = 'replica', password = 'secret', server = item.key,
       name = item.space, datetime = item.datetime, json = item.json, uuid = item.uuid, heartbeat = 1, retry = 1,
-      tls = (TLS == 'on' and true) or (TLS == 'ca' and { ca = '/certs/ca.pem' }) or false
+      tls = (TLS == 'on' and true) or (TLS == 'ca' and { ca = '/certs/ca.pem' }) or false, compress = COMPRESS
     }))
     other:map('Registry', 'Types', item.space)
     item.replica = other:start()

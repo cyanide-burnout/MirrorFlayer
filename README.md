@@ -13,7 +13,9 @@ with a replicator that lives inside Tarantool, where every value gets its
 Tarantool type.
 
 MariaDB, MySQL and PostgreSQL, with or without TLS; `mysql_native_password`,
-`caching_sha2_password`, `sha256_password`, `SCRAM-SHA-256` and `md5`.
+`caching_sha2_password`, `sha256_password`, `SCRAM-SHA-256` and `md5`. With
+MySQL and MariaDB the traffic is compressed (the compressed protocol, zlib),
+and the compressed binlog events of MariaDB (`log_bin_compress`) are read.
 Internals and OpenSSL findings are in
 [Documentation/Design.md](Documentation/Design.md).
 
@@ -21,7 +23,7 @@ Requires Tarantool 3.x and
 
 * MySQL or MariaDB with `log_bin`, `binlog_format=ROW`,
   `binlog_row_image=FULL` and GTIDs: always there in MariaDB, `gtid_mode=ON`
-  in MySQL. MySQL must not compress transactions
+  in MySQL. MySQL must not compress transactions with zstd
   (`binlog_transaction_compression=OFF`, the default) nor log partial JSON
   updates (`binlog_row_value_options` empty, the default);
 * or PostgreSQL 12 or later with `wal_level=logical`, free replication slots
@@ -62,7 +64,7 @@ local replica = MirrorFlayer.new({
 replica:map('Registry', 'Locations', 'GlobalLocations', { 'ID', 'Node', 'Kind', 'Link', 'Slot', 'Modified' })
 replica:start()
 
-replica:stat()   -- status, host, position, lag, event time, counters (transactions, rows, loads, fills, split, aborts), last error
+replica:stat()   -- status, host, position, lag, event time, tls, compressed, counters (transactions, rows, loads, fills, split, aborts), last error
 replica:reload() -- restart with a full load over the spaces
 replica:reload(true) -- the same, each space emptied right before its table is loaded
 replica:stop()
@@ -91,7 +93,8 @@ Configuration is Lua only.
 | `database`  | `user`         | PostgreSQL: the database |
 | `slot`      | `'mirrorflayer'` | PostgreSQL: the logical replication slot, one per replicator |
 | `publication` | `'mirrorflayer'` | PostgreSQL: the publication of the mapped tables (`CREATE PUBLICATION mirrorflayer FOR TABLE ...`) |
-| `tls`       | `false`        | `true` for TLS without verification, or `{ verify = 'none' \| 'ca' \| 'identity', ca = 'ca.pem', cert = 'client.pem', key = 'client.key' }`; with `ca` verification defaults to `'ca'`, without it to `'none'`; `'ca'` and `'identity'` without `ca` use the system store. Needs `MirrorFlayer.TLS` |
+| `tls`       | `false`        | `true` for TLS without verification, or `{ verify = 'none' \| 'ca' \| 'identity', ca = 'ca.pem', cert = 'client.pem', key = 'client.key' }`; with `ca` verification defaults to `'ca'`, without it to `'none'`; `'ca'` and `'identity'` without `ca` use the system store. Needs `MirrorFlayer.Support` |
+| `compress`  | `true`         | MySQL and MariaDB: the compressed protocol (zlib) when the server has it and `MirrorFlayer.Support` is there; the server compresses, the replicator inflates. PostgreSQL has no compression in its protocol |
 | `public_key` | —             | PEM public key of the source for `caching_sha2_password`/`sha256_password` without TLS; without it the key is asked from the server (open to a man in the middle) |
 | `position`  | `'ReplicatorPositions'` | Space that keeps the position, created when missing with a key of the type of `key`; the tuple is `{ key, position, event time, type of the source }`, a position of another type under the same key is not taken (a full load follows) |
 | `key`       | `server`, `slot` | Key of the position in that space: a stable number or string of this replicator, the replica server id of MySQL or the slot of PostgreSQL by default; two replicators of an instance with the same `position` and `key` are refused by `start()`, so replicators of different sources with the same server id or slot need a `key` of their own |
@@ -252,19 +255,22 @@ driver of MySQL and MariaDB, `Source/PostgreSQL/` the driver of PostgreSQL;
 they are installed as `$(PREFIX)/share/tarantool/MirrorFlayer/` with the
 `MySQL/` and `PostgreSQL/` subdirectories, which is what
 `require('MirrorFlayer')` finds. Only `init.lua` is lowercase: that is the
-file Lua looks for in a package directory. `Source/TLS.c` is `MirrorFlayer.TLS`, installed as
-`$(PREFIX)/lib/<triplet>/tarantool/MirrorFlayer/TLS.so`; it needs the headers
-of `tarantool-dev` and `libssl-dev` and links the system OpenSSL.
+file Lua looks for in a package directory. `Source/Support.c` is
+`MirrorFlayer.Support` (TLS, RSA and inflate), installed as
+`$(PREFIX)/lib/<triplet>/tarantool/MirrorFlayer/Support.so`; it needs the
+headers of `tarantool-dev`, `libssl-dev` and `zlib1g-dev` and links the system
+OpenSSL and zlib. Up to 2.2 it was `MirrorFlayer.TLS` (`TLS.so`).
 
 ```
-make                                       # Source/TLS.so, stripped (STRIP=true keeps it as built)
-make install [PREFIX=/usr] [DESTDIR=...]   # Lua modules and TLS.so
+make                                       # Source/Support.so, stripped (STRIP=true keeps it as built)
+make install [PREFIX=/usr] [DESTDIR=...]   # Lua modules and Support.so
 make check                                 # syntax check with tarantool
 make test                                  # Docker test, see Tests/
 ```
 
-`TLS=0` builds and installs no `TLS.so`. Then only plain connections work,
-and `caching_sha2_password` only while the server has the password cached
+`SUPPORT=0` builds and installs no `Support.so`. Then only plain uncompressed
+connections work, compressed binlog events stop the replicator, and
+`caching_sha2_password` works only while the server has the password cached
 (it needs RSA for the full authentication without TLS).
 
 With LuaRocks of Tarantool (`tt rocks`), the same headers are needed:
@@ -277,7 +283,7 @@ tt rocks make mirrorflayer-scm-1.rockspec   # from a checkout
 
 ## Tests
 
-`Tests/DockerTest.sh` builds `TLS.so`, runs MariaDB or MySQL with a row-based
+`Tests/DockerTest.sh` builds `Support.so`, runs MariaDB or MySQL with a row-based
 binlog, or PostgreSQL with `wal_level=logical`, and Tarantool 3 in Docker and
 drives `Tests/MirrorFlayerTest.lua` or `Tests/PostgreSQLTest.lua` through
 phases. `SERVER=mariadb|galera|mysql|postgresql` picks the source
@@ -289,6 +295,8 @@ goes through RSA first and the server cache later; PostgreSQL users with
 `SCRAM-SHA-256`.
 `THREAD=1` runs every replicator of the test in an application thread; it
 needs Tarantool 3.9 or later, `TARANTOOL_IMAGE=tarantool/tarantool:3.9.0`.
+MySQL and MariaDB connections are compressed, `COMPRESS=0` turns that off;
+`BINLOG_COMPRESS=1` makes MariaDB compress its binlog events.
 
 1. `load` — tables with data exist before the start: full load, values of all
    types, then INSERT/UPDATE/DELETE over the stream, a key change, a

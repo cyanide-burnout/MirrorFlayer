@@ -16,6 +16,7 @@ local NULL = box.NULL
 local CLIENT_LONG_PASSWORD                  = 0x00000001
 local CLIENT_LONG_FLAG                      = 0x00000004
 local CLIENT_CONNECT_WITH_DB                = 0x00000008
+local CLIENT_COMPRESS                       = 0x00000020
 local CLIENT_PROTOCOL_41                    = 0x00000200
 local CLIENT_SSL                            = 0x00000800
 local CLIENT_TRANSACTIONS                   = 0x00002000
@@ -240,6 +241,52 @@ local function lenenc(value)
   return '\254' .. u32(value % 0x100000000) .. u32(math.floor(value / 0x100000000))
 end
 
+-- Compressed protocol ---------------------------------------------------------
+
+-- After the authentication packets go in frames: 3 bytes of the length, the sequence of the frame, 3 bytes of the
+-- length before compression (0 when the frame is not compressed); a frame holds packets or a part of one. The
+-- client sends its frames uncompressed, the server compresses what is worth it.
+local Compressed   = {}
+Compressed.__index = Compressed
+
+function Compressed:read(n, timeout)
+  while #self.buffer - self.offset + 1 < n do
+    local header   = self.stream:read(7, timeout)
+    local length   = byte(header, 1) + byte(header, 2) * 0x100 + byte(header, 3) * 0x10000
+    local original = byte(header, 5) + byte(header, 6) * 0x100 + byte(header, 7) * 0x10000
+    local payload  = length > 0 and self.stream:read(length, timeout) or ''
+    if original > 0 then payload = self.uncompress(payload, original) end
+    self.sequence            = (byte(header, 4) + 1) % 0x100
+    self.buffer, self.offset = sub(self.buffer, self.offset) .. payload, 1
+  end
+  local data  = sub(self.buffer, self.offset, self.offset + n - 1)
+  self.offset = self.offset + n
+  if self.offset > #self.buffer then self.buffer, self.offset = '', 1 end
+  return data
+end
+
+function Compressed:write(data, timeout)
+  local offset = 1
+  repeat
+    local part = sub(data, offset, offset + 0xfffffe)
+    self.stream:write(sub(u32(#part), 1, 3) .. char(self.sequence) .. '\0\0\0' .. part, timeout)
+    self.sequence = (self.sequence + 1) % 0x100
+    offset        = offset + #part
+  until offset > #data
+end
+
+function Compressed:wait(timeout)
+  return #self.buffer >= self.offset or self.stream:wait(timeout)
+end
+
+function Compressed:close()
+  self.stream:close()
+end
+
+function Compressed:fd()
+  return self.stream:fd()
+end
+
 -- Quotes a string literal for SQL
 local function literal(value)
   return "'" .. string.gsub(value, "[%z\n\r\\'\"\026]", {
@@ -331,17 +378,18 @@ end
 
 function Connection:command(payload)
   self.sequence = 0
+  if self.compressed then self.stream.sequence = 0 end
   self:write_packet(payload)
 end
 
 -- Password for the full authentication of caching_sha2_password and
 -- sha256_password without TLS: RSA-OAEP with the public key of the server
 function Connection:encrypt(pem)
-  local status, TLS = pcall(require, 'MirrorFlayer.TLS')
+  local status, support = pcall(require, 'MirrorFlayer.Support')
   if not status then
-    fatal('%s without TLS needs MirrorFlayer.TLS (TLS.so) for RSA: %s', self.plugin, tostring(TLS))
+    fatal('%s without TLS needs MirrorFlayer.Support (Support.so) for RSA: %s', self.plugin, tostring(support))
   end
-  return TLS.encrypt(pem, xor(self.password .. '\0', self.scramble))
+  return support.encrypt(pem, xor(self.password .. '\0', self.scramble))
 end
 
 -- First answer of an authentication plugin to the scramble
@@ -440,6 +488,15 @@ function Connection:handshake(user, database)
   end
   flags = band(flags, bor(capabilities, CLIENT_PROTOCOL_41))
 
+  -- Compression when the server has it and MirrorFlayer.Support is there to inflate
+  if self.compress and band(capabilities, CLIENT_COMPRESS) ~= 0 then
+    local status, support = pcall(require, 'MirrorFlayer.Support')
+    if status then
+      flags           = bor(flags, CLIENT_COMPRESS)
+      self.uncompress = support.uncompress
+    end
+  end
+
   if self.tls ~= nil then
     if band(capabilities, CLIENT_SSL) == 0 then
       fatal('server %s does not support TLS', self.version)
@@ -469,6 +526,10 @@ function Connection:handshake(user, database)
     local first = byte(packet, 1)
     if first == 0x00 then
       self.password = nil
+      if self.uncompress ~= nil then
+        self.stream     = setmetatable({ stream = self.stream, uncompress = self.uncompress, buffer = '', offset = 1, sequence = 0 }, Compressed)
+        self.compressed = true
+      end
       return
     end
     if first == 0xff then
@@ -591,13 +652,15 @@ end
 -- Opens a connection and authenticates.
 -- options: host, port, user, password, database, timeout,
 -- tls (nil or { verify, ca, cert, key }), public_key (PEM of the server for
--- caching_sha2_password and sha256_password without TLS)
+-- caching_sha2_password and sha256_password without TLS), compress (the
+-- compressed protocol when the server has it)
 local function connect(options)
   local connection = setmetatable({
     sequence   = 0,
     password   = options.password or '',
     tls        = options.tls or nil,
-    public_key = options.public_key
+    public_key = options.public_key,
+    compress   = options.compress
   }, Connection)
   if connection.tls == true then
     connection.tls = { verify = 'none' }

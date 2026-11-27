@@ -1,17 +1,19 @@
-// MirrorFlayer.TLS: TLS (OpenSSL) over an already connected descriptor, and RSA-OAEP for caching_sha2_password
+// MirrorFlayer.Support: TLS (OpenSSL) over an already connected descriptor, RSA-OAEP for caching_sha2_password
+// and inflate (zlib) for the compressed protocol and the compressed binlog events of MySQL and MariaDB
 //
 // MySQL switches to TLS after the greeting on the same TCP connection (the SSL Request packet), so a session takes
 // over the descriptor of the Tarantool socket, sock:fd(). The descriptor stays non-blocking and belongs to the socket,
 // which closes it; the session waits with coio_wait() on SSL_ERROR_WANT_READ / SSL_ERROR_WANT_WRITE, so other fibers
 // run meanwhile.
 //
-//   local session = TLS.connect(sock:fd(), { host = 'db1', verify = 'identity', ca = '/etc/ssl/ca.pem',
+//   local session = Support.connect(sock:fd(), { host = 'db1', verify = 'identity', ca = '/etc/ssl/ca.pem',
 //                                            cert = 'client.pem', key = 'client.key', timeout = 30 })
 //   session:read(n [, timeout])        -- exactly n bytes
 //   session:write(data [, timeout])
 //   session:wait(timeout)              -- true when data can be read, false when the time ran out
 //   session:close()
-//   TLS.encrypt(pem, data)             -- RSA-OAEP (SHA-1, as MySQL) with a PEM public key
+//   Support.encrypt(pem, data)         -- RSA-OAEP (SHA-1, as MySQL) with a PEM public key
+//   Support.uncompress(data, length)   -- data of compress() of zlib, length is the size of the original
 //
 // verify is 'none' (encryption only), 'ca' (the chain against ca or the system store) or 'identity' (also the host
 // name). Errors are raised with the reason of OpenSSL.
@@ -21,6 +23,7 @@
 
 #include <errno.h>
 #include <string.h>
+#include <zlib.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include <openssl/pem.h>
@@ -32,7 +35,7 @@
 #include <lauxlib.h>
 #include <module.h>
 
-#define SESSION  "MirrorFlayer.TLS"
+#define SESSION  "MirrorFlayer.Support"
 #define CHUNK    16384
 #define TIMEOUT  30.0
 
@@ -156,7 +159,7 @@ static const char* GetOption(lua_State* state, const char* name)
   return value;
 }
 
-// TLS.connect(descriptor, options): handshake over the connected descriptor
+// Support.connect(descriptor, options): handshake over the connected descriptor
 
 static int ConnectSession(lua_State* state)
 {
@@ -350,7 +353,7 @@ static int CloseSession(lua_State* state)
   return 0;
 }
 
-// TLS.encrypt(pem, data): RSA with OAEP padding (SHA-1 and MGF1 with SHA-1), what caching_sha2_password and
+// Support.encrypt(pem, data): RSA with OAEP padding (SHA-1 and MGF1 with SHA-1), what caching_sha2_password and
 // sha256_password of MySQL expect from a client without TLS
 
 static int EncryptData(lua_State* state)
@@ -403,7 +406,36 @@ static int EncryptData(lua_State* state)
   return 1;
 }
 
-LUA_API int luaopen_MirrorFlayer_TLS(lua_State* state)
+// Support.uncompress(data, length): what compress() of zlib made of length bytes, the frames of the compressed
+// protocol and the compressed binlog events carry the length of the original; the buffer is a userdata of Lua
+
+static int UncompressData(lua_State* state)
+{
+  const char* data;
+  size_t size;
+  lua_Number expected;
+  uLongf length;
+  Bytef* buffer;
+  int result;
+
+  data     = luaL_checklstring(state, 1, &size);
+  expected = luaL_checknumber(state, 2);
+
+  if ((expected < 1) || (expected > 0x40000000))
+    return luaL_error(state, "uncompress: the length %f is out of range", expected);
+
+  length = (uLongf)expected;
+  buffer = (Bytef*)lua_newuserdata(state, length);
+  result = uncompress(buffer, &length, (const Bytef*)data, (uLong)size);
+
+  if ((result != Z_OK) || (length != (uLongf)expected))
+    return luaL_error(state, "uncompress: %s", (result != Z_OK) ? zError(result) : "the length differs");
+
+  lua_pushlstring(state, (const char*)buffer, length);
+  return 1;
+}
+
+LUA_API int luaopen_MirrorFlayer_Support(lua_State* state)
 {
   static const luaL_Reg methods[] =
   {
@@ -417,9 +449,10 @@ LUA_API int luaopen_MirrorFlayer_TLS(lua_State* state)
 
   static const luaL_Reg functions[] =
   {
-    { "connect", ConnectSession },
-    { "encrypt", EncryptData    },
-    { NULL,      NULL           }
+    { "connect",    ConnectSession },
+    { "encrypt",    EncryptData    },
+    { "uncompress", UncompressData },
+    { NULL,         NULL           }
   };
 
   OPENSSL_init_ssl(0, NULL);

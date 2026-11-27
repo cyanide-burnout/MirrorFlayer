@@ -21,7 +21,7 @@
 --   commit(changes, state, time)    a transaction: { id, operation, old, new }
 --   advance(state)                  the position moves without changes
 --   heartbeat()                     the source is there
---   report(fields)                  status, error, host, port, tls
+--   report(fields)                  status, error, host, port, tls, compressed
 --   request_reload()                the position is lost, a full load comes
 --   cleanup()                       after a failed session
 
@@ -174,8 +174,9 @@ function Runner:session(host, port)
   local connection = self.driver.connect(self.config, host, port)
   self.connection  = connection
   self.host, self.port = host, port
-  self.sink:report({ host = host, port = port, tls = connection.secure == true })
-  self:say('info', 'connected to %s:%d, %s%s', host, port, connection.version, connection.secure and ', TLS' or '')
+  self.sink:report({ host = host, port = port, tls = connection.secure == true, compressed = connection.compressed == true })
+  self:say('info', 'connected to %s:%d, %s%s%s', host, port, connection.version, connection.secure and ', TLS' or '',
+    connection.compressed and ', compressed' or '')
 
   for _, source in ipairs(self.order) do
     self:describe(connection, source)

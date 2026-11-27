@@ -32,13 +32,8 @@ local failure, fatal = errors.failure, errors.fatal
 -- The binlog no longer has the position asked for
 local LOST_POSITION = 1236
 
-local COMPRESSED = 'compressed binlog events are not supported, turn log_bin_compress off'
-
 -- Events that stop the replicator
 local UNSUPPORTED = {
-  [E.QUERY_COMPRESSED] = COMPRESSED,
-  [E.WRITE_ROWS_COMPRESSED_V1] = COMPRESSED, [E.UPDATE_ROWS_COMPRESSED_V1] = COMPRESSED, [E.DELETE_ROWS_COMPRESSED_V1] = COMPRESSED,
-  [E.WRITE_ROWS_COMPRESSED] = COMPRESSED, [E.UPDATE_ROWS_COMPRESSED] = COMPRESSED, [E.DELETE_ROWS_COMPRESSED] = COMPRESSED,
   [E.ANONYMOUS_GTID] = 'transaction without GTID: the source needs gtid_mode=ON',
   [E.GTID_TAGGED] = 'tagged GTIDs are not supported',
   [E.TRANSACTION_PAYLOAD] = 'compressed transactions are not supported, turn binlog_transaction_compression off',
@@ -85,7 +80,7 @@ local function ready(connection)
 end
 
 -- Connects to one host. config: user, password, timeout, tls, public_key,
--- server, heartbeat, check, datetime, json, uuid
+-- compress, server, heartbeat, check, datetime, json, uuid
 local function connect(config, host, port)
   local connection = protocol.connect({
     host       = host,
@@ -94,7 +89,8 @@ local function connect(config, host, port)
     password   = config.password,
     timeout    = config.timeout,
     tls        = config.tls,
-    public_key = config.public_key
+    public_key = config.public_key,
+    compress   = config.compress
   })
   local status, galera = pcall(function ()
     connection:query("SET time_zone = '+00:00'")
@@ -112,6 +108,7 @@ local function connect(config, host, port)
     connection = connection,
     version    = connection.version .. (galera and ', Galera' or ''),
     secure     = connection.secure == true,
+    compressed = connection.compressed == true,
     dialect    = connection.mariadb and mariadb or gtid
   }, Session)
 end
@@ -258,7 +255,7 @@ function Session:event(packet)
     end
   elseif type == E.XID then
     self:commit(header)
-  elseif type == E.QUERY then
+  elseif type == E.QUERY or type == E.QUERY_COMPRESSED then
     local query = binlog.query(header)
     local text  = statement(query.query)
     if text == 'BEGIN' then

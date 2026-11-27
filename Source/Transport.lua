@@ -1,6 +1,6 @@
 -- Byte stream to the server: read(n), write(s), wait(timeout), close()
 --
--- Plain TCP uses the socket module of Tarantool. TLS (MirrorFlayer.TLS) takes
+-- Plain TCP uses the socket module of Tarantool. TLS (MirrorFlayer.Support) takes
 -- over the descriptor of an already connected socket, because MySQL and
 -- PostgreSQL switch to TLS on the same connection: secure() is called after
 -- the SSL Request, then reads and writes go through the TLS session.
@@ -33,12 +33,12 @@ function Transport:secure(options)
   if self:buffered() > 0 then
     error(string.format('%s sent data before the TLS handshake', self.peer), 0)
   end
-  local status, TLS = pcall(require, 'MirrorFlayer.TLS')
+  local status, support = pcall(require, 'MirrorFlayer.Support')
   if not status then
-    error(setmetatable({ message = 'TLS is requested, but MirrorFlayer.TLS (TLS.so) cannot be loaded: ' .. tostring(TLS), fatal = true },
+    error(setmetatable({ message = 'TLS is requested, but MirrorFlayer.Support (Support.so) cannot be loaded: ' .. tostring(support), fatal = true },
       { __tostring = function (self) return self.message end }), 0)
   end
-  self.session = TLS.connect(self.sock:fd(), {
+  self.session = support.connect(self.sock:fd(), {
     host    = self.host,
     verify  = options.verify,
     ca      = options.ca,

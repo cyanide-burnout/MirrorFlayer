@@ -1,5 +1,5 @@
 -- Binlog events: header, CRC32, FORMAT_DESCRIPTION, ROTATE, QUERY, XID,
--- TABLE_MAP and WRITE/UPDATE/DELETE_ROWS v1/v2
+-- TABLE_MAP and WRITE/UPDATE/DELETE_ROWS v1/v2, compressed ones of MariaDB too
 
 local ffi = require('ffi')
 local bit = require('bit')
@@ -30,7 +30,12 @@ local E = {
 
 local ROWS = {
   [E.WRITE_ROWS_V1]  = { 'insert', 1 }, [E.UPDATE_ROWS_V1] = { 'update', 1 }, [E.DELETE_ROWS_V1] = { 'delete', 1 },
-  [E.WRITE_ROWS_V2]  = { 'insert', 2 }, [E.UPDATE_ROWS_V2] = { 'update', 2 }, [E.DELETE_ROWS_V2] = { 'delete', 2 }
+  [E.WRITE_ROWS_V2]  = { 'insert', 2 }, [E.UPDATE_ROWS_V2] = { 'update', 2 }, [E.DELETE_ROWS_V2] = { 'delete', 2 },
+  -- MariaDB with log_bin_compress: the rows after the bitmaps are compressed
+  [E.WRITE_ROWS_COMPRESSED_V1] = { 'insert', 1, true }, [E.UPDATE_ROWS_COMPRESSED_V1] = { 'update', 1, true },
+  [E.DELETE_ROWS_COMPRESSED_V1] = { 'delete', 1, true },
+  [E.WRITE_ROWS_COMPRESSED] = { 'insert', 2, true }, [E.UPDATE_ROWS_COMPRESSED] = { 'update', 2, true },
+  [E.DELETE_ROWS_COMPRESSED] = { 'delete', 2, true }
 }
 
 local HEADER = 19
@@ -57,6 +62,26 @@ local function crc32(data, length)
     value = bxor(CRC[band(bxor(value, pointer[index]), 0xff)], rshift(value, 8))
   end
   return bnot(value)
+end
+
+-- Compressed content of MariaDB: 0x80 | algorithm << 4 | the count of length bytes, the length before compression
+-- (big-endian), then what compress() of zlib made, the only algorithm. Returns a reader of the content
+local support
+
+local function inflate(data)
+  local first = data:u8()
+  if band(first, 0xf0) ~= 0x80 then
+    protocol.fatal('compressed binlog event: unknown format 0x%02x', first)
+  end
+  local length = data:be(band(first, 0x07))
+  if support == nil then
+    local status, module = pcall(require, 'MirrorFlayer.Support')
+    if not status then
+      protocol.fatal('compressed binlog events need MirrorFlayer.Support (Support.so): %s', tostring(module))
+    end
+    support = module
+  end
+  return protocol.reader(support.uncompress(data:rest(), length))
 end
 
 -- Events ---------------------------------------------------------------------
@@ -117,6 +142,7 @@ local function query(header)
   data:skip(status)
   local schema = data:bytes(length)
   data:skip(1)
+  if header.type == E.QUERY_COMPRESSED then data = inflate(data) end
   return { schema = schema, query = data:rest() }
 end
 
@@ -205,7 +231,7 @@ end
 local function rows(header, map, columns)
   local kind = ROWS[header.type]
   local data = header.data
-  local operation, version = kind[1], kind[2]
+  local operation, version, compressed = kind[1], kind[2], kind[3]
   data:skip(6 + 2) -- table id, flags
   if version == 2 then
     data:skip(data:u16() - 2)
@@ -223,6 +249,7 @@ local function rows(header, map, columns)
   if operation == 'update' then
     full(after, 'after')
   end
+  if compressed then data = inflate(data) end
   local result = {}
   while data:left() > 0 do
     local first = image(data, map, columns, before)
