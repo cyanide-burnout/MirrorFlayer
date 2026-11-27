@@ -112,6 +112,7 @@ case "$SERVER" in
       openssl x509 -req -in server.csr -CA ca.pem -CAkey ca.key -CAcreateserial -days 2 -out server.pem 2>/dev/null
       chown postgres:postgres server.key server.pem && chmod 600 server.key
       exec docker-entrypoint.sh postgres -c wal_level=logical -c max_replication_slots=10 -c max_wal_senders=10 \
+        -c logical_decoding_work_mem=64kB \
         -c ssl=on -c ssl_cert_file=/certs/server.pem -c ssl_key_file=/certs/server.key'
     ;;
   *)

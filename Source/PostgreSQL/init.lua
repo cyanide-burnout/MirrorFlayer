@@ -241,10 +241,20 @@ function Session:change(message)
   if relation.source == nil then
     return
   end
-  if self.transaction == nil then
+  -- A change of a streamed transaction goes to it with the xid of its
+  -- subtransaction, which a Stream Abort may drop
+  local changes, subxids
+  if self.streaming ~= nil then
+    local stream = self.streams[self.streaming]
+    changes, subxids = stream.changes, stream.subxids
+  elseif self.transaction ~= nil then
+    changes = self.transaction.changes
+  else
     error(failure('pgoutput: change outside of a transaction'), 0)
   end
-  local changes = self.transaction.changes
+  if subxids ~= nil then
+    table.insert(subxids, message.xid)
+  end
   if message.kind == 'I' then
     table.insert(changes, { relation.source, 'insert', nil, row(relation, message.new) })
   elseif message.kind == 'U' then
@@ -266,10 +276,45 @@ function Session:change(message)
   end
 end
 
+-- Stream Abort: the whole transaction, or the changes of a subtransaction
+function Session:abort(message)
+  local stream = self.streams[message.xid]
+  if stream == nil then
+    return
+  end
+  if message.subxid == message.xid then
+    self.streams[message.xid] = nil
+    return
+  end
+  local changes, subxids = {}, {}
+  for index, change in ipairs(stream.changes) do
+    if stream.subxids[index] ~= message.subxid then
+      table.insert(changes, change)
+      table.insert(subxids, stream.subxids[index])
+    end
+  end
+  stream.changes, stream.subxids = changes, subxids
+end
+
 function Session:message(payload)
-  local message = output.decode(payload)
+  local message = output.decode(payload, self.streaming ~= nil)
   local kind    = message.kind
-  if kind == 'B' then
+  if kind == 'S' then
+    self.streaming = message.xid
+    self.streams[message.xid] = self.streams[message.xid] or { changes = {}, subxids = {} }
+  elseif kind == 'E' then
+    self.streaming = nil
+  elseif kind == 'c' then
+    local stream = self.streams[message.xid]
+    self.streams[message.xid] = nil
+    self.handler:commit(stream and stream.changes or {}, self.slot .. '/' .. output.format(message.finish), message.time)
+    self.confirmed = message.finish
+    if clock.time() - self.reported >= 1 then
+      self:feedback(false)
+    end
+  elseif kind == 'A' then
+    self:abort(message)
+  elseif kind == 'B' then
     self.transaction = { changes = {} }
   elseif kind == 'C' then
     local transaction = self.transaction
@@ -303,7 +348,9 @@ function Session:keepalive(payload)
   local stop = data:u64()
   data:i64()
   local reply = data:u8() == 1
-  if self.transaction == nil and stop > self.confirmed then
+  -- A streamed transaction still open has sent changes before stop: the
+  -- position stays before it, so a restart gets it again from its beginning
+  if self.transaction == nil and next(self.streams) == nil and stop > self.confirmed then
     self.confirmed = stop
     self.handler:advance(self.slot .. '/' .. output.format(stop))
   end
@@ -334,12 +381,17 @@ function Session:stream(state, sources, handler)
   self.handler     = handler
   self.relations   = {}
   self.transaction = nil
+  self.streams     = {}
+  self.streaming   = nil
   self.confirmed   = output.lsn(start)
   self.reported    = 0
 
+  -- PostgreSQL 14 and later streams large transactions while they run
+  local major   = tonumber(string.match(tostring(connection.parameters.server_version), '^(%d+)')) or 0
+  local options = major >= 14 and "proto_version '2', streaming 'on'" or "proto_version '1'"
   local status, problem, _, _, copy = pcall(connection.query, connection, string.format(
-    "START_REPLICATION SLOT %s LOGICAL %s (proto_version '1', publication_names %s)",
-    protocol.identifier(self.slot), start, protocol.literal(protocol.identifier(self.publication))))
+    "START_REPLICATION SLOT %s LOGICAL %s (%s, publication_names %s)",
+    protocol.identifier(self.slot), start, options, protocol.literal(protocol.identifier(self.publication))))
   if not status then
     if type(problem) == 'table' and problem.code == UNDEFINED_OBJECT and
        string.find(problem.message, 'replication slot', 1, true) ~= nil then

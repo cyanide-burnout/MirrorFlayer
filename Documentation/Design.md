@@ -142,6 +142,18 @@ which are described again when they differ. Values come as text in protocol
 `slot/X/Y`; a slot that is gone (42704 on `START_REPLICATION`) asks for a
 full load.
 
+### Streamed transactions of PostgreSQL
+
+PostgreSQL 14 and later get `proto_version '2', streaming 'on'`: a
+transaction larger than `logical_decoding_work_mem` comes in blocks while it
+runs, Stream Start (its xid) and Stream Stop around them, the changes inside
+with the xid of their (sub)transaction before the rest. The driver keeps the
+changes of each with the xid of their subtransaction; Stream Abort drops a
+subtransaction or the whole one, Stream Commit hands the rest to the engine
+with its end LSN. While a streamed transaction is open the position does not
+follow keepalives, so a reconnect gets it again from its beginning.
+PostgreSQL 12 and 13 stay on version 1.
+
 ### Stream request (MariaDB)
 
 ```

@@ -517,6 +517,33 @@ local function load()
       return pcall(exec, string.format("SELECT pg_drop_replication_slot('%s')", item.slot))
     end, 'drop of slot ' .. item.slot)
   end
+  -- Large transactions come streamed while they run (logical_decoding_work_mem
+  -- of the server is 64kB): a savepoint rolled back drops its changes, a
+  -- transaction rolled back drops all
+  exec('BEGIN',
+    [[INSERT INTO "Registry"."Users" SELECT s, 1, 'B' || s, 1, NULL FROM generate_series(30001, 34000) s]],
+    'SAVEPOINT inner_part',
+    [[INSERT INTO "Registry"."Users" SELECT s, 1, 'S' || s, 1, NULL FROM generate_series(34001, 36000) s]],
+    'ROLLBACK TO SAVEPOINT inner_part',
+    [[UPDATE "Registry"."Users" SET "Call" = 'BIG' WHERE "ID" BETWEEN 30001 AND 30100]],
+    'COMMIT',
+    'BEGIN',
+    [[INSERT INTO "Registry"."Users" SELECT s, 1, 'R' || s, 1, NULL FROM generate_series(40001, 44000) s]],
+    'ROLLBACK')
+  exec([[INSERT INTO "Registry"."Other" ("Value") VALUES ('after the large ones')]])
+  caught_up(replica)
+  local streamed
+  wait(function ()
+    streamed = tonumber(sql:value("SELECT stream_txns FROM pg_stat_replication_slots WHERE slot_name = 'mirrorflayer'"))
+    return streamed ~= nil and streamed >= 2
+  end, 'streamed transactions in pg_stat_replication_slots')
+  ok(true, 'large transactions were streamed (%s)', tostring(streamed))
+  ok(box.space.GlobalProfiles:get(34000) ~= nil and box.space.GlobalProfiles:get(30050)[2] == 'BIG',
+    'streamed: the committed part is there')
+  ok(box.space.GlobalProfiles:get(35000) == nil, 'streamed: the savepoint rolled back is not')
+  ok(box.space.GlobalProfiles:get(42000) == nil, 'streamed: the transaction rolled back is not')
+  exec([[DELETE FROM "Registry"."Users" WHERE "ID" > 30000]])
+  caught_up(replica)
   replica:stop()
 end
 

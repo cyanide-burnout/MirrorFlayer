@@ -1,6 +1,9 @@
--- pgoutput, protocol version 1: Begin, Commit, Relation, Insert, Update,
--- Delete, Truncate; Origin, Type and Message are skipped. LSNs are uint64_t,
--- times are seconds since the Unix epoch.
+-- pgoutput, protocol versions 1 and 2: Begin, Commit, Relation, Insert,
+-- Update, Delete, Truncate; with version 2 (PostgreSQL 14 and later, streaming
+-- 'on') a large transaction comes in blocks while it runs: Stream Start and
+-- Stop around them, the changes inside with the xid of their (sub)transaction,
+-- Stream Commit and Stream Abort at the end. Origin, Type and Message are
+-- skipped. LSNs are uint64_t, times are seconds since the Unix epoch.
 
 local ffi = require('ffi')
 
@@ -58,10 +61,8 @@ local function tuple(data)
   return values
 end
 
--- Decodes one message from the payload of XLogData
-local function decode(payload)
-  local data = protocol.reader(payload)
-  local kind = char(data:u8())
+-- A message of a transaction, its kind read
+local function decode_change(kind, data)
   if kind == 'B' then
     return { kind = kind, lsn = data:u64(), time = time(data), xid = data:u32() }
   elseif kind == 'C' then
@@ -105,6 +106,39 @@ local function decode(payload)
   end
   -- Origin, Type, Message
   return { kind = kind }
+end
+
+-- Messages that carry an xid inside a stream block
+local STREAMED = { R = true, Y = true, I = true, U = true, D = true, T = true, M = true }
+
+-- Decodes one message from the payload of XLogData; streamed tells that a
+-- stream block is open
+local function decode(payload, streamed)
+  local data = protocol.reader(payload)
+  local kind = char(data:u8())
+  local xid
+  if streamed and STREAMED[kind] then
+    xid = data:u32()
+  end
+  if kind == 'S' then
+    return { kind = kind, xid = data:u32(), first = data:u8() == 1 }
+  elseif kind == 'E' then
+    return { kind = kind }
+  elseif kind == 'c' then
+    local message = { kind = kind, xid = data:u32() }
+    data:u8() -- flags
+    message.lsn    = data:u64()
+    message.finish = data:u64()
+    message.time   = time(data)
+    return message
+  elseif kind == 'A' then
+    return { kind = kind, xid = data:u32(), subxid = data:u32() }
+  end
+  local message = decode_change(kind, data)
+  if xid ~= nil then
+    message.xid = xid
+  end
+  return message
 end
 
 return {
