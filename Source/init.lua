@@ -520,5 +520,5 @@ end
 
 return {
   new      = new,
-  _VERSION = '2.2.2'
+  _VERSION = '3.0.0'
 }
