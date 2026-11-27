@@ -311,7 +311,7 @@ connections work, compressed binlog events stop the replicator, and
 With LuaRocks of Tarantool (`tt rocks`), the same headers are needed (see *Libraries*):
 
 ```
-tt rocks install https://raw.githubusercontent.com/cyanide-burnout/MirrorFlayer/2.2.2/mirrorflayer-2.2.2-1.rockspec
+tt rocks install https://raw.githubusercontent.com/cyanide-burnout/MirrorFlayer/3.0.0/mirrorflayer-3.0.0-1.rockspec
 tt rocks install https://raw.githubusercontent.com/cyanide-burnout/MirrorFlayer/main/mirrorflayer-scm-1.rockspec   # main
 tt rocks make mirrorflayer-scm-1.rockspec   # from a checkout
 ```
