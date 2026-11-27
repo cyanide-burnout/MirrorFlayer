@@ -98,26 +98,38 @@ function Session:close()
   self.connection:close()
 end
 
--- Reads the columns of the table from the catalogue: without dropped and
--- generated columns, in the order pgoutput sends them
-function Session:describe(source)
+-- Reads the columns of the source tables from the catalogue in one query:
+-- without dropped and generated columns, in the order pgoutput sends them,
+-- { [source] = columns }
+function Session:describe(sources)
+  local schemas, tables = {}, {}
+  for index, source in ipairs(sources) do
+    schemas[index] = protocol.literal(source.database)
+    tables[index]  = protocol.literal(source.table)
+  end
   local _, rows = self.connection:query(string.format([[
-SELECT a.attname, a.atttypid, b.oid, b.typname, b.typtype, b.typcategory
+SELECT n.nspname, c.relname, a.attname, a.atttypid, b.oid, b.typname, b.typtype, b.typcategory
   FROM pg_catalog.pg_attribute a
   JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
   JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
   JOIN pg_catalog.pg_type t ON t.oid = a.atttypid
   JOIN pg_catalog.pg_type b ON b.oid = CASE WHEN t.typtype = 'd' THEN t.typbasetype ELSE t.oid END
- WHERE n.nspname = %s AND c.relname = %s AND a.attnum > 0 AND NOT a.attisdropped AND a.attgenerated = ''
- ORDER BY a.attnum]], protocol.literal(source.database), protocol.literal(source.table)))
-  if #rows == 0 then
-    error(failure(string.format('table %s does not exist or is not visible', source.id)), 0)
+ WHERE n.nspname IN (%s) AND c.relname IN (%s) AND a.attnum > 0 AND NOT a.attisdropped AND a.attgenerated = ''
+ ORDER BY n.nspname, c.relname, a.attnum]], table.concat(schemas, ', '), table.concat(tables, ', ')))
+  local described = {}
+  for _, row in ipairs(rows) do
+    local key = row[1] .. '\0' .. row[2]
+    described[key] = described[key] or {}
+    table.insert(described[key], column.describe(row[3], row[4], row[5], row[6], row[7], row[8], self.config))
   end
-  local columns = {}
-  for index, row in ipairs(rows) do
-    columns[index] = column.describe(row[1], row[2], row[3], row[4], row[5], row[6], self.config)
+  local result = {}
+  for _, source in ipairs(sources) do
+    result[source] = described[source.database .. '\0' .. source.table]
+    if not result[source] then
+      error(failure(string.format('table %s does not exist or is not visible', source.id)), 0)
+    end
   end
-  return columns
+  return result
 end
 
 -- Creates the slot anew with an exported snapshot and opens a transaction in

@@ -104,7 +104,7 @@ of binlogs: a driver gives it a session on one host.
 | Call | Does |
 |------|------|
 | `driver.connect(config, host, port)` | connects and returns a session with `version` and `secure` |
-| `session:describe(source)` | the columns of the table: name, type, kind, supported |
+| `session:describe(sources)` | the columns of the tables in one query, `{ [source] = columns }`: name, type, kind, supported |
 | `session:position()` | the current position of the source as a string |
 | `session:load(source, each)` | the snapshot of the table, `each(row)` with values converted |
 | `session:stream(position, sources, handler)` | changes after the position until an error: `handler:started()`, `handler:commit(changes, position, event_time)`, `handler:heartbeat()`, `handler:refresh(source)` after DDL |

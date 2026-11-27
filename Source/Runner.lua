@@ -77,19 +77,22 @@ end
 
 -- Tables -------------------------------------------------------------------------
 
--- Reads the columns of the source table and binds the targets to them
-function Runner:describe(connection, source)
-  local columns = connection:describe(source)
-  self.sink:columns(source.id, columns)
-  source.columns = columns
-  source.stale   = false
+-- Reads the columns of the source tables (in one query of the driver) and
+-- binds the targets to them
+function Runner:describe(connection, sources)
+  local described = connection:describe(sources)
+  for _, source in ipairs(sources) do
+    self.sink:columns(source.id, described[source])
+    source.columns = described[source]
+    source.stale   = false
+  end
 end
 
 -- Describes a table again over a connection of its own while the stream
 -- holds the current one (the driver asks for it after DDL)
 function Runner:refresh(source)
   local connection = self.driver.connect(self.config, self.host, self.port)
-  local status, problem = pcall(self.describe, self, connection, source)
+  local status, problem = pcall(self.describe, self, connection, { source })
   connection:close()
   if not status then
     error(problem, 0)
@@ -191,9 +194,7 @@ function Runner:session(host, port)
   self:say('info', 'connected to %s:%d, %s%s%s', host, port, connection.version, connection.secure and ', TLS' or '',
     connection.compressed and ', compressed with ' .. tostring(connection.algorithm) or '')
 
-  for _, source in ipairs(self.order) do
-    self:describe(connection, source)
-  end
+  self:describe(connection, self.order)
 
   local state          = self.sink:position()
   local reload, flush  = self.sink:flags()

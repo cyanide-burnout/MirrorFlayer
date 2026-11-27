@@ -4,7 +4,7 @@
 -- MariaDB or a GTID set uuid:1-100 of MySQL.
 --
 -- A driver gives the engine (MirrorFlayer) a session on one host:
---   session:describe(source)          columns of the table
+--   session:describe(sources)         columns of the tables, { [source] = columns }
 --   session:position()                the current position of the source
 --   session:load(source, each)        the rows of the table, values converted
 --   session:stream(state, sources, handler)
@@ -115,39 +115,56 @@ function Session:close()
   self.connection:close()
 end
 
--- Reads the columns of the source table from information_schema
-function Session:describe(source)
+-- Reads the columns of the source tables from information_schema in one query
+-- (and the checks of MariaDB in another), { [source] = columns }
+function Session:describe(sources)
   local connection = self.connection
-  local _, rows = connection:query(string.format(
-    'SELECT COLUMN_NAME, DATA_TYPE, COLUMN_TYPE FROM information_schema.COLUMNS ' ..
-    'WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s ORDER BY ORDINAL_POSITION',
-    protocol.literal(source.database), protocol.literal(source.table)))
-  if #rows == 0 then
-    error(failure(string.format('table %s does not exist or is not visible', source.id)), 0)
+  local schemas, tables = {}, {}
+  for index, source in ipairs(sources) do
+    schemas[index] = protocol.literal(source.database)
+    tables[index]  = protocol.literal(source.table)
   end
-  local columns = {}
-  for index, row in ipairs(rows) do
-    columns[index] = column.describe(row[1], row[2], row[3], self.config)
-  end
+  -- JSON of MariaDB is LONGTEXT with a json_valid() check
+  local json = {}
   if connection.mariadb then
-    -- JSON of MariaDB is LONGTEXT with a json_valid() check
     local _, checks = connection:query(string.format(
-      'SELECT CHECK_CLAUSE FROM information_schema.CHECK_CONSTRAINTS WHERE CONSTRAINT_SCHEMA = %s AND TABLE_NAME = %s',
-      protocol.literal(source.database), protocol.literal(source.table)))
-    local json = {}
-    for _, item in ipairs(checks) do
-      local name = string.match(item[1], '^json_valid%(`(.-)`%)$')
+      'SELECT CONSTRAINT_SCHEMA, TABLE_NAME, CHECK_CLAUSE FROM information_schema.CHECK_CONSTRAINTS ' ..
+      'WHERE CONSTRAINT_SCHEMA IN (%s) AND TABLE_NAME IN (%s)', table.concat(schemas, ', '), table.concat(tables, ', ')))
+    for _, row in ipairs(checks) do
+      local name = string.match(row[3], '^json_valid%(`(.-)`%)$')
       if name ~= nil then
-        json[name] = true
-      end
-    end
-    for _, item in ipairs(columns) do
-      if json[item.name] and item.kind == 'string' then
-        item.kind = 'json'
+        json[row[1] .. '\0' .. row[2] .. '\0' .. name] = true
       end
     end
   end
-  return columns
+  local _, rows = connection:query(string.format(
+    'SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, DATA_TYPE, COLUMN_TYPE FROM information_schema.COLUMNS ' ..
+    'WHERE TABLE_SCHEMA IN (%s) AND TABLE_NAME IN (%s) ORDER BY TABLE_SCHEMA, TABLE_NAME, ORDINAL_POSITION',
+    table.concat(schemas, ', '), table.concat(tables, ', ')))
+  -- Columns by schema and table as the server gives them and in lower case
+  -- (lower_case_table_names, case-insensitive file systems)
+  local described = {}
+  for _, row in ipairs(rows) do
+    local key = row[1] .. '\0' .. row[2]
+    if not described[key] then
+      described[key] = {}
+      described[string.lower(key)] = described[string.lower(key)] or described[key]
+    end
+    local item = column.describe(row[3], row[4], row[5], self.config)
+    if json[key .. '\0' .. item.name] and item.kind == 'string' then
+      item.kind = 'json'
+    end
+    table.insert(described[key], item)
+  end
+  local result = {}
+  for _, source in ipairs(sources) do
+    local key = source.database .. '\0' .. source.table
+    result[source] = described[key] or described[string.lower(key)]
+    if not result[source] then
+      error(failure(string.format('table %s does not exist or is not visible', source.id)), 0)
+    end
+  end
+  return result
 end
 
 -- The GTID state of the server. The full load takes it first: changes made
