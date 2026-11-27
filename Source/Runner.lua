@@ -176,7 +176,7 @@ function Runner:session(host, port)
   self.host, self.port = host, port
   self.sink:report({ host = host, port = port, tls = connection.secure == true, compressed = connection.compressed == true })
   self:say('info', 'connected to %s:%d, %s%s%s', host, port, connection.version, connection.secure and ', TLS' or '',
-    connection.compressed and ', compressed' or '')
+    connection.compressed and ', compressed with ' .. tostring(connection.algorithm) or '')
 
   for _, source in ipairs(self.order) do
     self:describe(connection, source)

@@ -1,5 +1,6 @@
-// MirrorFlayer.Support: TLS (OpenSSL) over an already connected descriptor, RSA-OAEP for caching_sha2_password
-// and inflate (zlib) for the compressed protocol and the compressed binlog events of MySQL and MariaDB
+// MirrorFlayer.Support: TLS (OpenSSL) over an already connected descriptor, RSA-OAEP for caching_sha2_password,
+// inflate (zlib, zstd) for the compressed protocol and the compressed binlog events of MySQL and MariaDB, CRC32 and
+// the signatures of the authentication plugins of MariaDB
 //
 // MySQL switches to TLS after the greeting on the same TCP connection (the SSL Request packet), so a session takes
 // over the descriptor of the Tarantool socket, sock:fd(). The descriptor stays non-blocking and belongs to the socket,
@@ -13,7 +14,9 @@
 //   session:wait(timeout)              -- true when data can be read, false when the time ran out
 //   session:close()
 //   Support.encrypt(pem, data)         -- RSA-OAEP (SHA-1, as MySQL) with a PEM public key
-//   Support.uncompress(data, length)   -- data of compress() of zlib, length is the size of the original
+//   Support.uncompress(data, length [, algorithm])
+//                                      -- data of compress() of zlib or of zstd ('zstd'), length is the size of
+//                                         the original
 //   Support.crc32(data [, length])     -- CRC-32 of zlib (IEEE 802.3) of the first length bytes
 //   Support.ed25519(password, message) -- the signature of client_ed25519 of MariaDB
 //   Support.parsec(password, salt, factor, message)
@@ -28,6 +31,7 @@
 #include <errno.h>
 #include <string.h>
 #include <zlib.h>
+#include <zstd.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include <openssl/pem.h>
@@ -410,26 +414,45 @@ static int EncryptData(lua_State* state)
   return 1;
 }
 
-// Support.uncompress(data, length): what compress() of zlib made of length bytes, the frames of the compressed
-// protocol and the compressed binlog events carry the length of the original; the buffer is a userdata of Lua
+// Support.uncompress(data, length [, algorithm]): what compress() of zlib, or zstd with 'zstd', made of length bytes;
+// the frames of the compressed protocol and the compressed binlog events carry the length of the original; the buffer
+// is a userdata of Lua
 
 static int UncompressData(lua_State* state)
 {
   const char* data;
+  const char* algorithm;
   size_t size;
+  size_t count;
   lua_Number expected;
   uLongf length;
   Bytef* buffer;
   int result;
 
-  data     = luaL_checklstring(state, 1, &size);
-  expected = luaL_checknumber(state, 2);
+  data      = luaL_checklstring(state, 1, &size);
+  expected  = luaL_checknumber(state, 2);
+  algorithm = luaL_optstring(state, 3, "zlib");
 
   if ((expected < 1) || (expected > 0x40000000))
     return luaL_error(state, "uncompress: the length %f is out of range", expected);
 
   length = (uLongf)expected;
   buffer = (Bytef*)lua_newuserdata(state, length);
+
+  if (strcmp(algorithm, "zstd") == 0)
+  {
+    count = ZSTD_decompress(buffer, length, data, size);
+
+    if (ZSTD_isError(count) || (count != length))
+      return luaL_error(state, "uncompress: %s", ZSTD_isError(count) ? ZSTD_getErrorName(count) : "the length differs");
+
+    lua_pushlstring(state, (const char*)buffer, length);
+    return 1;
+  }
+
+  if (strcmp(algorithm, "zlib") != 0)
+    return luaL_error(state, "uncompress: unknown algorithm %s", algorithm);
+
   result = uncompress(buffer, &length, (const Bytef*)data, (uLong)size);
 
   if ((result != Z_OK) || (length != (uLongf)expected))

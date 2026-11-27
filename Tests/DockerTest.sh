@@ -11,7 +11,8 @@
 #   TLS=off|on|ca          replicator connection: plain, TLS without verification,
 #                          TLS verified against the CA of the server
 #   COMPRESS=0             no compressed protocol of MySQL and MariaDB (on by default)
-#   BINLOG_COMPRESS=1      MariaDB compresses its binlog events (log_bin_compress)
+#   BINLOG_COMPRESS=1      MariaDB compresses its binlog events (log_bin_compress),
+#                          MySQL its transactions (binlog_transaction_compression)
 #   CLEARTEXT=1            the PAM user of MariaDB logs in with mysql_clear_password
 #                          instead of dialog
 #
@@ -76,8 +77,12 @@ case "$SERVER" in
     SERVER_IMAGE=${SERVER_IMAGE:-mysql:8.4}
     CLIENT=mysql
     TEST=Tests/MirrorFlayerTest.lua
+    if [ "$BINLOG_COMPRESS" = 1 ]; then
+      COMPRESSION=--binlog-transaction-compression=ON
+    fi
     set -- -e MYSQL_ROOT_PASSWORD=root "$SERVER_IMAGE" \
-      --server-id=1 --gtid-mode=ON --enforce-gtid-consistency=ON --binlog-row-image=FULL --binlog-checksum=CRC32
+      --server-id=1 --gtid-mode=ON --enforce-gtid-consistency=ON --binlog-row-image=FULL --binlog-checksum=CRC32 \
+      $COMPRESSION
     ;;
   postgresql)
     SERVER_IMAGE=${SERVER_IMAGE:-postgres:17}
@@ -112,7 +117,7 @@ mkdir -p "$WORK/data" "$WORK/late" "$WORK/certs"
 
 echo "building Support.so"
 docker run --rm --name "$BUILD" -v "$SOURCE:/src" -w /src --entrypoint sh "$TARANTOOL_IMAGE" -c \
-  "apt-get update -qq >/dev/null 2>&1; apt-get install -y -qq gcc make libssl-dev zlib1g-dev pkg-config >/dev/null 2>&1; make SUPPORT=1 && chown $(id -u):$(id -g) Source/Support.so"
+  "apt-get update -qq >/dev/null 2>&1; apt-get install -y -qq gcc make libssl-dev zlib1g-dev libzstd-dev pkg-config >/dev/null 2>&1; make SUPPORT=1 && chown $(id -u):$(id -g) Source/Support.so"
 
 docker network create "$NETWORK" >/dev/null
 docker run -d --name "$DATABASE" --network "$NETWORK" "$@" >/dev/null
@@ -143,8 +148,10 @@ if [ "$SERVER" = postgresql ]; then
   docker exec "$DATABASE" cat /certs/ca.pem > "$WORK/certs/ca.pem"
 else
   sql "SELECT VERSION(), @@log_bin, @@binlog_format, @@binlog_row_image, @@binlog_checksum" 2>/dev/null
-  if [ "$BINLOG_COMPRESS" = 1 ]; then
+  if [ "$BINLOG_COMPRESS" = 1 ] && [ "$CLIENT" = mariadb ]; then
     sql "SELECT @@log_bin_compress, @@log_bin_compress_min_len" 2>/dev/null
+  elif [ "$BINLOG_COMPRESS" = 1 ]; then
+    sql "SELECT @@binlog_transaction_compression, @@binlog_transaction_compression_level_zstd" 2>/dev/null
   fi
   if [ "$CLIENT" = mariadb ]; then
     docker exec "$DATABASE" sh -c 'useradd -M auth_pam && echo auth_pam:secret | chpasswd &&

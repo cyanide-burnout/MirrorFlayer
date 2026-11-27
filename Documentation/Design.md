@@ -32,9 +32,9 @@ Usage and values are in the [README](../README.md).
 * **Errors.** 1236 (the position is no longer in the binlog) → full load.
   Network and server errors → reconnect to the next host after `retry`
   seconds. A row image that is not FULL (`binlog_row_image` must be `FULL`),
-  transactions compressed by MySQL (zstd), anonymous or tagged GTIDs, partial
-  JSON updates, XA, a missing `MirrorFlayer.Support` when TLS is asked for or
-  a compressed event of MariaDB comes, and
+  anonymous or tagged GTIDs, partial JSON updates, XA, a missing
+  `MirrorFlayer.Support` when TLS is asked for or a compressed event or
+  transaction comes, and
   unsupported column types stop the replicator with an error in
   `stat().error` and the log.
 * **Metrics.** `stat()` returns `event_time` (source time of the last applied
@@ -84,7 +84,7 @@ installed as `MirrorFlayer/MySQL/`, its `init.lua` being the driver itself.
 | `MirrorFlayer.Column` | values in their Tarantool types, datetime and json modes |
 | `MirrorFlayer.Store` | targets, pacing of writes, full load, position |
 | `MirrorFlayer.Transport` | `read(n)`/`write(s)`/`close()`; plain TCP over the Tarantool `socket`, `secure()` moves it onto TLS |
-| `MirrorFlayer.Support` (`Source/Support.c` → `Support.so`, `TLS.so` up to 2.2) | TLS over the already connected descriptor, RSA-OAEP for `caching_sha2_password` and `sha256_password`, inflate (zlib) for the compressed protocol and the compressed events of MariaDB, CRC32 of binlog events, Ed25519 of `client_ed25519` and `parsec` |
+| `MirrorFlayer.Support` (`Source/Support.c` → `Support.so`, `TLS.so` up to 2.2) | TLS over the already connected descriptor, RSA-OAEP for `caching_sha2_password` and `sha256_password`, inflate (zlib, zstd) for the compressed protocol, the compressed events of MariaDB and transactions of MySQL, CRC32 of binlog events, Ed25519 of `client_ed25519` and `parsec` |
 | `MirrorFlayer.MySQL` (`Source/MySQL/init.lua`) | the driver of MySQL and MariaDB: session, columns, snapshot, binlog stream and its events |
 | `MirrorFlayer.MySQL.Protocol` | packets, greeting, SSL Request, authentication, `COM_QUERY` with a streamed text result |
 | `MirrorFlayer.MySQL.MariaDB` | MariaDB dialect: GTID state, GTID event, `COM_BINLOG_DUMP` after `@slave_connect_state` |
@@ -225,9 +225,10 @@ switch): 3 bytes of the length, a sequence of the frames (reset with each
 command, as the packet sequence), 3 bytes of the length before compression,
 0 when the frame is stored as it is. A frame carries packets or a part of
 one. The server compresses frames of 50 bytes and more with `compress()` of
-zlib; the replicator sends its frames uncompressed, so it only inflates. zstd
-(`CLIENT_ZSTD_COMPRESSION_ALGORITHM`) is MySQL 8.0.18 and later only, not
-MariaDB, and is not used. PostgreSQL has no compression in its protocol
+zlib; the replicator sends its frames uncompressed, so it only inflates. MySQL
+8.0.18 and later also has zstd (`CLIENT_ZSTD_COMPRESSION_ALGORITHM`, the
+handshake response ends with the level, 3): it is taken where the server
+offers it, the frames are the same with zstd inside. MariaDB has zlib only. PostgreSQL has no compression in its protocol
 (the libpq patch was never merged, `sslcompression` is gone since 14).
 
 MariaDB with `log_bin_compress` writes `QUERY_COMPRESSED` (the query text is
@@ -235,6 +236,13 @@ compressed) and `WRITE/UPDATE/DELETE_ROWS_COMPRESSED(_V1)` (the rows after the
 column bitmaps are compressed): a header byte `0x80 | algorithm << 4 |
 count of length bytes`, the length before compression big-endian, then zlib
 (algorithm 0, the only one). The checksum covers the event as written.
+
+MySQL with `binlog_transaction_compression` writes a transaction after its
+GTID as one `TRANSACTION_PAYLOAD`: fields of a type, a length and a value,
+length-encoded integers, up to the end mark 0 (1 the payload size, 2 the
+compression, 0 zstd or 255 none, 3 the size before compression), then the
+payload: the events of the transaction one after another, without checksums
+of their own.
 
 ### Authentication of MariaDB
 

@@ -36,7 +36,6 @@ local LOST_POSITION = 1236
 local UNSUPPORTED = {
   [E.ANONYMOUS_GTID] = 'transaction without GTID: the source needs gtid_mode=ON',
   [E.GTID_TAGGED] = 'tagged GTIDs are not supported',
-  [E.TRANSACTION_PAYLOAD] = 'compressed transactions are not supported, turn binlog_transaction_compression off',
   [E.PARTIAL_UPDATE_ROWS] = 'partial JSON updates are not supported, binlog_row_value_options must be empty',
   [E.XA_PREPARE] = 'XA transactions are not supported'
 }
@@ -109,6 +108,7 @@ local function connect(config, host, port)
     version    = connection.version .. (galera and ', Galera' or ''),
     secure     = connection.secure == true,
     compressed = connection.compressed == true,
+    algorithm  = connection.algorithm,
     dialect    = connection.mariadb and mariadb or gtid
   }, Session)
 end
@@ -206,8 +206,10 @@ function Session:commit(header)
   self.handler:commit(transaction.changes, self.dialect.format(self.state), header.timestamp)
 end
 
-function Session:event(packet)
-  local header = binlog.event(packet, self.checksum)
+-- An event of the stream; inside is an event of a compressed transaction of
+-- MySQL, without a checksum of its own
+function Session:event(packet, inside)
+  local header = binlog.event(packet, self.checksum and not inside)
   local type   = header.type
 
   if type == E.FORMAT_DESCRIPTION then
@@ -252,6 +254,11 @@ function Session:event(packet)
     local changes = self.transaction.changes
     for _, row in ipairs(rows) do
       table.insert(changes, { map.source, operation, row[1], row[2] })
+    end
+  elseif type == E.TRANSACTION_PAYLOAD then
+    -- The events of a compressed transaction of MySQL, after its GTID
+    for _, packet in ipairs(binlog.payload(header)) do
+      self:event(packet, true)
     end
   elseif type == E.XID then
     self:commit(header)

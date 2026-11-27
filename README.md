@@ -16,8 +16,10 @@ MariaDB, MySQL and PostgreSQL, with or without TLS; `mysql_native_password`,
 `caching_sha2_password`, `sha256_password`, `client_ed25519`, `parsec`,
 `mysql_clear_password` and `dialog` (PAM of MariaDB, the password answers
 its password questions), `SCRAM-SHA-256` and `md5`. With
-MySQL and MariaDB the traffic is compressed (the compressed protocol, zlib),
-and the compressed binlog events of MariaDB (`log_bin_compress`) are read.
+MySQL and MariaDB the traffic is compressed (the compressed protocol, zstd
+where MySQL has it, zlib otherwise), and compressed binlogs are read: events
+of MariaDB (`log_bin_compress`) and transactions of MySQL
+(`binlog_transaction_compression`).
 Internals and OpenSSL findings are in
 [Documentation/Design.md](Documentation/Design.md).
 
@@ -25,9 +27,8 @@ Requires Tarantool 3.x and
 
 * MySQL or MariaDB with `log_bin`, `binlog_format=ROW`,
   `binlog_row_image=FULL` and GTIDs: always there in MariaDB, `gtid_mode=ON`
-  in MySQL. MySQL must not compress transactions with zstd
-  (`binlog_transaction_compression=OFF`, the default) nor log partial JSON
-  updates (`binlog_row_value_options` empty, the default);
+  in MySQL. MySQL must not log partial JSON updates
+  (`binlog_row_value_options` empty, the default);
 * or PostgreSQL 12 or later with `wal_level=logical`, free replication slots
   and WAL senders, and a publication of the mapped tables.
 
@@ -96,7 +97,7 @@ Configuration is Lua only.
 | `slot`      | `'mirrorflayer'` | PostgreSQL: the logical replication slot, one per replicator |
 | `publication` | `'mirrorflayer'` | PostgreSQL: the publication of the mapped tables (`CREATE PUBLICATION mirrorflayer FOR TABLE ...`) |
 | `tls`       | `false`        | `true` for TLS without verification, or `{ verify = 'none' \| 'ca' \| 'identity', ca = 'ca.pem', cert = 'client.pem', key = 'client.key' }`; with `ca` verification defaults to `'ca'`, without it to `'none'`; `'ca'` and `'identity'` without `ca` use the system store. Needs `MirrorFlayer.Support` |
-| `compress`  | `true`         | MySQL and MariaDB: the compressed protocol (zlib) when the server has it and `MirrorFlayer.Support` is there; the server compresses, the replicator inflates. PostgreSQL has no compression in its protocol |
+| `compress`  | `true`         | MySQL and MariaDB: the compressed protocol when the server has it and `MirrorFlayer.Support` is there, zstd of MySQL 8.0.18 and later, zlib otherwise; the server compresses, the replicator inflates. PostgreSQL has no compression in its protocol |
 | `public_key` | —             | PEM public key of the source for `caching_sha2_password`/`sha256_password` without TLS; without it the key is asked from the server (open to a man in the middle) |
 | `position`  | `'ReplicatorPositions'` | Space that keeps the position, created when missing with a key of the type of `key`; the tuple is `{ key, position, event time, type of the source }`, a position of another type under the same key is not taken (a full load follows) |
 | `key`       | `server`, `slot` | Key of the position in that space: a stable number or string of this replicator, the replica server id of MySQL or the slot of PostgreSQL by default; two replicators of an instance with the same `position` and `key` are refused by `start()`, so replicators of different sources with the same server id or slot need a `key` of their own |
@@ -260,8 +261,8 @@ they are installed as `$(PREFIX)/share/tarantool/MirrorFlayer/` with the
 file Lua looks for in a package directory. `Source/Support.c` is
 `MirrorFlayer.Support` (TLS, RSA and inflate), installed as
 `$(PREFIX)/lib/<triplet>/tarantool/MirrorFlayer/Support.so`; it needs the
-headers of `tarantool-dev`, `libssl-dev` and `zlib1g-dev` and links the system
-OpenSSL and zlib. Up to 2.2 it was `MirrorFlayer.TLS` (`TLS.so`).
+headers of `tarantool-dev`, `libssl-dev`, `zlib1g-dev` and `libzstd-dev` and
+links the system OpenSSL, zlib and zstd. Up to 2.2 it was `MirrorFlayer.TLS` (`TLS.so`).
 
 ```
 make                                       # Source/Support.so, stripped (STRIP=true keeps it as built)
@@ -298,7 +299,8 @@ goes through RSA first and the server cache later; PostgreSQL users with
 `THREAD=1` runs every replicator of the test in an application thread; it
 needs Tarantool 3.9 or later, `TARANTOOL_IMAGE=tarantool/tarantool:3.9.0`.
 MySQL and MariaDB connections are compressed, `COMPRESS=0` turns that off;
-`BINLOG_COMPRESS=1` makes MariaDB compress its binlog events. MariaDB gets
+`BINLOG_COMPRESS=1` makes MariaDB compress its binlog events and MySQL its
+transactions. MariaDB gets
 users of `ed25519`, `parsec` and `pam` (over `pam_unix`), the test logs in
 with each; `CLEARTEXT=1` makes PAM use `mysql_clear_password` instead of
 `dialog`.

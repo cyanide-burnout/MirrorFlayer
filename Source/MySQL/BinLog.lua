@@ -84,6 +84,51 @@ local function inflate(data)
   return protocol.reader(support.uncompress(data:rest(), length))
 end
 
+-- TRANSACTION_PAYLOAD of MySQL (binlog_transaction_compression): fields of
+-- a type, a length and a value, all length-encoded integers, up to the end
+-- mark 0: 1 the size of the payload, 2 the compression (0 zstd, 255 none),
+-- 3 the size before compression. The payload is the events of the
+-- transaction one after another. Returns them as packets for event()
+local function payload(header)
+  local data = header.data
+  local size, compression, original
+  while true do
+    local field = data:lenenc()
+    if field == 0 then
+      break
+    end
+    local length = data:lenenc()
+    if field == 1 then
+      size = data:lenenc()
+    elseif field == 2 then
+      compression = data:lenenc()
+    elseif field == 3 then
+      original = data:lenenc()
+    else
+      data:skip(length)
+    end
+  end
+  local content = data:bytes(size or data:left())
+  if compression == 0 then
+    if not loaded then
+      protocol.fatal('compressed transactions need MirrorFlayer.Support (Support.so): %s', tostring(support))
+    end
+    if original == nil then
+      protocol.fatal('compressed transaction without its size')
+    end
+    content = support.uncompress(content, original, 'zstd')
+  elseif compression ~= 255 then
+    protocol.fatal('compressed transaction: unknown compression %s', tostring(compression))
+  end
+  local events, position = {}, 1
+  while position <= #content do
+    local length = protocol.reader(content, position + 9):u32()
+    table.insert(events, string.sub(content, position, position + length - 1))
+    position = position + length
+  end
+  return events
+end
+
 -- Events ---------------------------------------------------------------------
 
 -- Parses an event of the dump stream. packet is the payload after the 0x00
@@ -273,6 +318,7 @@ return {
   query      = query,
   xid        = xid,
   table_map  = table_map,
+  payload    = payload,
   rows_table = rows_table,
   rows       = rows
 }

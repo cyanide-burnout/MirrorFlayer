@@ -444,6 +444,12 @@ local function load()
   ok(replica:stat().tls == (TLS ~= 'off'), 'TLS %s, connection %s', TLS, replica:stat().tls and 'encrypted' or 'plain')
   ok(replica:stat().compressed == COMPRESS, 'compress %s, connection %s', tostring(COMPRESS),
     replica:stat().compressed and 'compressed' or 'not compressed')
+  -- zstd where MySQL has it, zlib of MariaDB
+  local probe = protocol.connect({ host = HOST, port = 3306, user = 'root', password = 'root', timeout = 30,
+    compress = COMPRESS })
+  ok(probe.algorithm == (COMPRESS and (MARIADB and 'zlib' or 'zstd') or nil), 'compression algorithm %s',
+    tostring(probe.algorithm))
+  probe:close()
   locations_equal('load')
   ok(box.space.GlobalProfiles:count() == 20000, 'GlobalProfiles has 20000 rows')
   ok(encode(box.space.GlobalProfiles:get(5)) == encode({ 5, 'C5', 1, 5 }), 'GlobalProfiles columns follow the space format')

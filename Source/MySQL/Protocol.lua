@@ -24,6 +24,10 @@ local CLIENT_SECURE_CONNECTION              = 0x00008000
 local CLIENT_MULTI_RESULTS                  = 0x00020000
 local CLIENT_PLUGIN_AUTH                    = 0x00080000
 local CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA = 0x00200000
+local CLIENT_ZSTD_COMPRESSION_ALGORITHM     = 0x04000000
+
+-- The level of zstd the server compresses with
+local ZSTD_LEVEL = 3
 
 local CHARSET_UTF8MB4_GENERAL_CI = 45
 
@@ -245,7 +249,8 @@ end
 
 -- After the authentication packets go in frames: 3 bytes of the length, the sequence of the frame, 3 bytes of the
 -- length before compression (0 when the frame is not compressed); a frame holds packets or a part of one. The
--- client sends its frames uncompressed, the server compresses what is worth it.
+-- client sends its frames uncompressed, the server compresses what is worth it with zlib, or with zstd where MySQL
+-- 8.0.18 and later has it.
 local Compressed   = {}
 Compressed.__index = Compressed
 
@@ -255,7 +260,7 @@ function Compressed:read(n, timeout)
     local length   = byte(header, 1) + byte(header, 2) * 0x100 + byte(header, 3) * 0x10000
     local original = byte(header, 5) + byte(header, 6) * 0x100 + byte(header, 7) * 0x10000
     local payload  = length > 0 and self.stream:read(length, timeout) or ''
-    if original > 0 then payload = self.uncompress(payload, original) end
+    if original > 0 then payload = self.uncompress(payload, original, self.algorithm) end
     self.sequence            = (byte(header, 4) + 1) % 0x100
     self.buffer, self.offset = sub(self.buffer, self.offset) .. payload, 1
   end
@@ -544,12 +549,16 @@ function Connection:handshake(user, database)
   end
   flags = band(flags, bor(capabilities, CLIENT_PROTOCOL_41))
 
-  -- Compression when the server has it and MirrorFlayer.Support is there to inflate
-  if self.compress and band(capabilities, CLIENT_COMPRESS) ~= 0 then
+  -- Compression when the server has it and MirrorFlayer.Support is there to inflate: zstd of MySQL, zlib otherwise
+  if self.compress and band(capabilities, bor(CLIENT_COMPRESS, CLIENT_ZSTD_COMPRESSION_ALGORITHM)) ~= 0 then
     local status, support = pcall(require, 'MirrorFlayer.Support')
     if status then
-      flags           = bor(flags, CLIENT_COMPRESS)
       self.uncompress = support.uncompress
+      if band(capabilities, CLIENT_ZSTD_COMPRESSION_ALGORITHM) ~= 0 then
+        flags, self.algorithm = bor(flags, CLIENT_ZSTD_COMPRESSION_ALGORITHM), 'zstd'
+      else
+        flags, self.algorithm = bor(flags, CLIENT_COMPRESS), 'zlib'
+      end
     end
   end
 
@@ -574,7 +583,8 @@ function Connection:handshake(user, database)
     u32(flags), u32(0x1000000), char(CHARSET_UTF8MB4_GENERAL_CI), string.rep('\0', 23),
     user, '\0', response,
     database ~= nil and database .. '\0' or '',
-    band(flags, CLIENT_PLUGIN_AUTH) ~= 0 and self.plugin .. '\0' or ''
+    band(flags, CLIENT_PLUGIN_AUTH) ~= 0 and self.plugin .. '\0' or '',
+    band(flags, CLIENT_ZSTD_COMPRESSION_ALGORITHM) ~= 0 and char(ZSTD_LEVEL) or ''
   }))
 
   while true do
@@ -583,7 +593,8 @@ function Connection:handshake(user, database)
     if first == 0x00 then
       self.password = nil
       if self.uncompress ~= nil then
-        self.stream     = setmetatable({ stream = self.stream, uncompress = self.uncompress, buffer = '', offset = 1, sequence = 0 }, Compressed)
+        self.stream     = setmetatable({ stream = self.stream, uncompress = self.uncompress, algorithm = self.algorithm,
+          buffer = '', offset = 1, sequence = 0 }, Compressed)
         self.compressed = true
       end
       return
