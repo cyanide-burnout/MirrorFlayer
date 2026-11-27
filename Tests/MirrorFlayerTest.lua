@@ -606,8 +606,12 @@ local function load()
   end
 
   -- XA: a prepared transaction waits for its decision; x4 stays prepared for
-  -- the resume, the replicator restarts in between (Galera has no XA)
-  if SERVER ~= 'galera' then
+  -- the resume, the replicator restarts in between. Galera has no XA: a plain
+  -- row keeps GlobalXa from being empty, which the resume would load alone
+  if SERVER == 'galera' then
+    exec("INSERT INTO Registry.Xa VALUES (1, 'one')")
+    caught_up(replica)
+  else
     exec("XA START 'x1'", "INSERT INTO Registry.Xa VALUES (1, 'one')", "XA END 'x1'", "XA PREPARE 'x1'")
     caught_up(replica)
     ok(box.space.GlobalXa:get(1) == nil, 'XA: prepared, not applied')
