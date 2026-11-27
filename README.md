@@ -33,13 +33,31 @@ Requires Tarantool 3.x and
   without GTIDs gives a binlog file and offset of its server
   (`file:<server_uuid>:<file>:<offset>`), which another host of `hosts` does
   not have: switching to it means a full load. Tagged GTIDs of MySQL 8.3 and
-  XA transactions are followed. Any `binlog_row_image` (`FULL`,
+  XA transactions are followed: a prepared one waits for its decision in the
+  space named after `position` with `XA` (`ReplicatorPositionsXA`, made with
+  the first one). Any `binlog_row_image` (`FULL`,
   `MINIMAL`, `NOBLOB`, `FULL_NODUP` of MariaDB) and the partial JSON updates
   of MySQL (`binlog_row_value_options=PARTIAL_JSON`) are read: a column a row
   image lacks keeps the value the target space has, a JSON diff is applied to
   the old document; a function target gets `NULL` for what it cannot know;
 * or PostgreSQL 12 or later with `wal_level=logical`, free replication slots
   and WAL senders, and a publication of the mapped tables.
+
+## 3.0
+
+3.0 breaks with 2.2 where a host or a build meets it:
+
+* `MirrorFlayer.TLS` (`TLS.so`) is `MirrorFlayer.Support` (`Support.so`), and
+  `TLS=0` of the Makefile is `SUPPORT=0`. Remove an installed `TLS.so`.
+* `Support.so` links zlib, zstd, libsodium and GSSAPI besides OpenSSL: a host
+  needs their libraries, `libsodium23` above all (see *Libraries*), or the
+  module does not load, and TLS with it.
+* `compress = true` by default: connections to MySQL and MariaDB are
+  compressed when the server has it.
+* An XA transaction is applied at its `XA COMMIT`, not before; prepared ones
+  wait in a space of their own, `<position>XA`.
+* Row images that are not `FULL`, partial JSON updates, compressed binlogs,
+  tagged GTIDs, MySQL without GTIDs and XA no longer stop the replicator.
 
 ## 2.0
 
@@ -260,6 +278,12 @@ gets the other old values as `NULL`. A TOAST value an update did not touch
 is not sent: the target keeps the one it has. `TRUNCATE` of a mapped table
 means a full load.
 
+PostgreSQL 14 and later streams a transaction larger than
+`logical_decoding_work_mem` while it runs (`streaming 'on'` of pgoutput 2):
+its changes are kept until its commit, a rolled back savepoint drops its own,
+and the position stays before it until then. PostgreSQL 12 and 13 send it
+whole at its commit.
+
 ## Build and install
 
 `Source/` holds the engine and the shared Lua modules, `Source/MySQL/` the
@@ -336,7 +360,9 @@ transactions. MariaDB gets
 users of `ed25519`, `parsec` and `pam` (over `pam_unix`), the test logs in
 with each; `CLEARTEXT=1` makes PAM use `mysql_clear_password` instead of
 `dialog`. `GSS=1` with PostgreSQL starts a KDC of its own and logs in with
-Kerberos.
+Kerberos. `ROW_IMAGE=MINIMAL|NOBLOB|FULL_NODUP` sets `binlog_row_image`,
+`PARTIAL_JSON=1` makes MySQL log JSON updates as diffs, `GTID=0` runs MySQL
+without GTIDs (the position is a binlog file and offset).
 
 1. `load` — tables with data exist before the start: full load, values of all
    types, then INSERT/UPDATE/DELETE over the stream, a key change, a
