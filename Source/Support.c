@@ -13,6 +13,7 @@
 //   session:write(data [, timeout])
 //   session:wait(timeout)              -- true when data can be read, false when the time ran out
 //   session:close()
+//   session:endpoint()                 -- tls-server-end-point of RFC 5929 for channel binding
 //   Support.encrypt(pem, data)         -- RSA-OAEP (SHA-1, as MySQL) with a PEM public key
 //   Support.uncompress(data, length [, algorithm])
 //                                      -- data of compress() of zlib or of zstd ('zstd'), length is the size of
@@ -32,6 +33,7 @@
 #include <string.h>
 #include <zlib.h>
 #include <zstd.h>
+#include <sodium.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include <openssl/pem.h>
@@ -361,6 +363,50 @@ static int CloseSession(lua_State* state)
   return 0;
 }
 
+// session:endpoint(): the channel binding tls-server-end-point of RFC 5929, the hash of the certificate of the
+// server by the hash of its signature, SHA-256 for MD5 and SHA-1, as SCRAM-SHA-256-PLUS of PostgreSQL wants it
+
+static int GetEndpoint(lua_State* state)
+{
+  struct Session* session;
+  X509* certificate;
+  const EVP_MD* hash;
+  unsigned char buffer[EVP_MAX_MD_SIZE];
+  unsigned int length;
+  int algorithm;
+  int status;
+
+  session = CheckSession(state);
+
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+  certificate = SSL_get1_peer_certificate(session->connection);
+#else
+  certificate = SSL_get_peer_certificate(session->connection);
+#endif
+
+  if (certificate == NULL)
+    return luaL_error(state, "TLS endpoint: the server sent no certificate");
+
+  hash = NULL;
+
+  if (OBJ_find_sigid_algs(X509_get_signature_nid(certificate), &algorithm, NULL) && (algorithm != NID_undef))
+  {
+    if ((algorithm == NID_md5) || (algorithm == NID_sha1))
+      algorithm = NID_sha256;
+    hash = EVP_get_digestbynid(algorithm);
+  }
+
+  length = 0;
+  status = (hash != NULL) && X509_digest(certificate, hash, buffer, &length);
+  X509_free(certificate);
+
+  if (!status)
+    return luaL_error(state, "TLS endpoint: the hash of the signature of the certificate is not known");
+
+  lua_pushlstring(state, (const char*)buffer, length);
+  return 1;
+}
+
 // Support.encrypt(pem, data): RSA with OAEP padding (SHA-1 and MGF1 with SHA-1), what caching_sha2_password and
 // sha256_password of MySQL expect from a client without TLS
 
@@ -481,216 +527,54 @@ static int CalculateChecksum(lua_State* state)
 }
 
 // Ed25519 of client_ed25519: MariaDB signs with the expanded key SHA-512 of the password itself, not of a 32-byte seed,
-// which EVP of OpenSSL cannot take, so the group operations of edwards25519 are done here over BIGNUM: extended
-// coordinates (X:Y:Z:T), the unified addition of a = -1 (add-2008-hwcd-3). Not in constant time: one signature per
-// connection
+// which EVP of OpenSSL cannot take; libsodium has the group and scalar operations to sign with an expanded key:
+// a = clamp(expanded[0..31]), A = aB, r = SHA-512(expanded[32..63] || M) mod l, R = rB,
+// k = SHA-512(R || A || M) mod l, S = r + ka mod l, the signature R || S
 
-#define ED25519_P   "7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffed"
-#define ED25519_L   "1000000000000000000000000000000014def9dea2f79cd65812631a5cf5d3ed"
-#define ED25519_D   "52036cee2b6ffe738cc740797779e89800700a4d4141d8ab75eb4dca135978a3"
-#define ED25519_BX  "216936d3cd6e53fec0a4e231fdd6dc5c692cc7609525a7b2c9562d608f25d51a"
-#define ED25519_BY  "6666666666666666666666666666666666666666666666666666666666666658"
-
-struct Point
-{
-  BIGNUM* x;
-  BIGNUM* y;
-  BIGNUM* z;
-  BIGNUM* t;
-};
-
-struct Curve
-{
-  BN_CTX* context;
-  BIGNUM* p;
-  BIGNUM* l;
-  BIGNUM* d2;
-  struct Point base;
-};
-
-static int AddPoints(struct Curve* curve, struct Point* result, const struct Point* left, const struct Point* right)
-{
-  BN_CTX* context;
-  BIGNUM* a;
-  BIGNUM* b;
-  BIGNUM* c;
-  BIGNUM* d;
-  BIGNUM* e;
-  BIGNUM* f;
-  BIGNUM* g;
-  BIGNUM* h;
-  BIGNUM* u;
-  int status;
-
-  context = curve->context;
-  BN_CTX_start(context);
-  a = BN_CTX_get(context);
-  b = BN_CTX_get(context);
-  c = BN_CTX_get(context);
-  d = BN_CTX_get(context);
-  e = BN_CTX_get(context);
-  f = BN_CTX_get(context);
-  g = BN_CTX_get(context);
-  h = BN_CTX_get(context);
-  u = BN_CTX_get(context);
-
-  status =
-    (u != NULL) &&
-    BN_mod_sub(a, left->y, left->x, curve->p, context) &&
-    BN_mod_sub(u, right->y, right->x, curve->p, context) &&
-    BN_mod_mul(a, a, u, curve->p, context) &&
-    BN_mod_add(b, left->y, left->x, curve->p, context) &&
-    BN_mod_add(u, right->y, right->x, curve->p, context) &&
-    BN_mod_mul(b, b, u, curve->p, context) &&
-    BN_mod_mul(c, left->t, curve->d2, curve->p, context) &&
-    BN_mod_mul(c, c, right->t, curve->p, context) &&
-    BN_mod_mul(d, left->z, right->z, curve->p, context) &&
-    BN_mod_add(d, d, d, curve->p, context) &&
-    BN_mod_sub(e, b, a, curve->p, context) &&
-    BN_mod_sub(f, d, c, curve->p, context) &&
-    BN_mod_add(g, d, c, curve->p, context) &&
-    BN_mod_add(h, b, a, curve->p, context) &&
-    BN_mod_mul(result->x, e, f, curve->p, context) &&
-    BN_mod_mul(result->y, g, h, curve->p, context) &&
-    BN_mod_mul(result->t, e, h, curve->p, context) &&
-    BN_mod_mul(result->z, f, g, curve->p, context);
-
-  BN_CTX_end(context);
-  return status;
-}
-
-// result = scalar * B, double and add
-static int MultiplyBase(struct Curve* curve, struct Point* result, const BIGNUM* scalar)
-{
-  int status;
-  int bit;
-
-  BN_zero(result->x);
-  BN_zero(result->t);
-  status = BN_one(result->y) && BN_one(result->z);
-
-  for (bit = BN_num_bits(scalar) - 1; status && (bit >= 0); bit --)
-    status =
-      AddPoints(curve, result, result, result) &&
-      (!BN_is_bit_set(scalar, bit) || AddPoints(curve, result, result, &curve->base));
-
-  return status;
-}
-
-// y in 32 bytes little-endian, the low bit of x in the top bit
-static int EncodePoint(struct Curve* curve, unsigned char* buffer, const struct Point* point)
-{
-  BIGNUM* inverse;
-  BIGNUM* x;
-  BIGNUM* y;
-  int status;
-
-  BN_CTX_start(curve->context);
-  inverse = BN_CTX_get(curve->context);
-  x       = BN_CTX_get(curve->context);
-  y       = BN_CTX_get(curve->context);
-
-  status =
-    (y != NULL) &&
-    (BN_mod_inverse(inverse, point->z, curve->p, curve->context) != NULL) &&
-    BN_mod_mul(x, point->x, inverse, curve->p, curve->context) &&
-    BN_mod_mul(y, point->y, inverse, curve->p, curve->context) &&
-    (BN_bn2lebinpad(y, buffer, 32) == 32);
-
-  if (status && BN_is_odd(x))
-    buffer[31] |= 0x80;
-
-  BN_CTX_end(curve->context);
-  return status;
-}
-
-// SHA-512 of up to three parts, as a little-endian number modulo l
-static int HashParts(struct Curve* curve, BIGNUM* result, const void* first, size_t first_size,
-                     const void* second, size_t second_size, const void* third, size_t third_size)
-{
-  unsigned char hash[64];
-  EVP_MD_CTX* context;
-  int status;
-
-  context = EVP_MD_CTX_new();
-  status  =
-    (context != NULL) &&
-    EVP_DigestInit_ex(context, EVP_sha512(), NULL) &&
-    EVP_DigestUpdate(context, first, first_size) &&
-    EVP_DigestUpdate(context, second, second_size) &&
-    ((third == NULL) || EVP_DigestUpdate(context, third, third_size)) &&
-    EVP_DigestFinal_ex(context, hash, NULL) &&
-    (BN_lebin2bn(hash, 64, result) != NULL) &&
-    BN_nnmod(result, result, curve->l, curve->context);
-
-  EVP_MD_CTX_free(context);
-  return status;
-}
-
-// The signature R || S of message with the expanded key (64 bytes: the scalar before clamping, then the prefix)
 static int SignExpanded(unsigned char* signature, const unsigned char* expanded, const unsigned char* message, size_t length)
 {
-  struct Curve curve;
-  struct Point point;
-  unsigned char key[32];
+  crypto_hash_sha512_state context;
+  unsigned char key[64];
+  unsigned char hash[64];
   unsigned char public[32];
-  BIGNUM* d;
-  BIGNUM* a;
-  BIGNUM* r;
-  BIGNUM* k;
-  BIGNUM* s;
+  unsigned char nonce[32];
+  unsigned char challenge[32];
+  unsigned char product[32];
   int status;
 
+  memset(key, 0, sizeof(key));
   memcpy(key, expanded, 32);
   key[0]  &= 248;
   key[31] &= 63;
   key[31] |= 64;
 
-  if ((curve.context = BN_CTX_new()) == NULL)
-    return 0;
-
-  BN_CTX_start(curve.context);
-  curve.p      = BN_CTX_get(curve.context);
-  curve.l      = BN_CTX_get(curve.context);
-  curve.d2     = BN_CTX_get(curve.context);
-  curve.base.x = BN_CTX_get(curve.context);
-  curve.base.y = BN_CTX_get(curve.context);
-  curve.base.z = BN_CTX_get(curve.context);
-  curve.base.t = BN_CTX_get(curve.context);
-  point.x      = BN_CTX_get(curve.context);
-  point.y      = BN_CTX_get(curve.context);
-  point.z      = BN_CTX_get(curve.context);
-  point.t      = BN_CTX_get(curve.context);
-  d            = BN_CTX_get(curve.context);
-  a            = BN_CTX_get(curve.context);
-  r            = BN_CTX_get(curve.context);
-  k            = BN_CTX_get(curve.context);
-  s            = BN_CTX_get(curve.context);
+  crypto_hash_sha512_init(&context);
+  crypto_hash_sha512_update(&context, expanded + 32, 32);
+  crypto_hash_sha512_update(&context, message, length);
+  crypto_hash_sha512_final(&context, hash);
+  crypto_core_ed25519_scalar_reduce(nonce, hash);
 
   status =
-    (s != NULL) &&
-    BN_hex2bn(&curve.p, ED25519_P) &&
-    BN_hex2bn(&curve.l, ED25519_L) &&
-    BN_hex2bn(&d, ED25519_D) &&
-    BN_mod_add(curve.d2, d, d, curve.p, curve.context) &&
-    BN_hex2bn(&curve.base.x, ED25519_BX) &&
-    BN_hex2bn(&curve.base.y, ED25519_BY) &&
-    BN_one(curve.base.z) &&
-    BN_mod_mul(curve.base.t, curve.base.x, curve.base.y, curve.p, curve.context) &&
-    (BN_lebin2bn(key, 32, a) != NULL) &&
-    MultiplyBase(&curve, &point, a) &&
-    EncodePoint(&curve, public, &point) &&
-    HashParts(&curve, r, expanded + 32, 32, message, length, NULL, 0) &&
-    MultiplyBase(&curve, &point, r) &&
-    EncodePoint(&curve, signature, &point) &&
-    HashParts(&curve, k, signature, 32, public, 32, message, length) &&
-    BN_mod_mul(s, k, a, curve.l, curve.context) &&
-    BN_mod_add(s, s, r, curve.l, curve.context) &&
-    (BN_bn2lebinpad(s, signature + 32, 32) == 32);
+    (crypto_scalarmult_ed25519_base_noclamp(public, key) == 0) &&
+    (crypto_scalarmult_ed25519_base_noclamp(signature, nonce) == 0);
 
-  OPENSSL_cleanse(key, sizeof(key));
-  BN_CTX_end(curve.context);
-  BN_CTX_free(curve.context);
+  if (status)
+  {
+    crypto_hash_sha512_init(&context);
+    crypto_hash_sha512_update(&context, signature, 32);
+    crypto_hash_sha512_update(&context, public, 32);
+    crypto_hash_sha512_update(&context, message, length);
+    crypto_hash_sha512_final(&context, hash);
+    crypto_core_ed25519_scalar_reduce(challenge, hash);
+
+    // The clamped scalar below 2^255, reduced modulo l as 64 bytes
+    crypto_core_ed25519_scalar_reduce(key, key);
+    crypto_core_ed25519_scalar_mul(product, challenge, key);
+    crypto_core_ed25519_scalar_add(signature + 32, nonce, product);
+  }
+
+  sodium_memzero(key, sizeof(key));
+  sodium_memzero(nonce, sizeof(nonce));
   return status;
 }
 
@@ -711,10 +595,11 @@ static int SignEd25519(lua_State* state)
   message  = luaL_checklstring(state, 2, &length);
 
   status =
-    EVP_Digest(password, size, expanded, NULL, EVP_sha512(), NULL) &&
+    (sodium_init() >= 0) &&
+    (crypto_hash_sha512(expanded, (const unsigned char*)password, size) == 0) &&
     SignExpanded(signature, expanded, (const unsigned char*)message, length);
 
-  OPENSSL_cleanse(expanded, sizeof(expanded));
+  sodium_memzero(expanded, sizeof(expanded));
 
   if (!status)
     return luaL_error(state, "ed25519: signing failed");
@@ -775,12 +660,13 @@ LUA_API int luaopen_MirrorFlayer_Support(lua_State* state)
 {
   static const luaL_Reg methods[] =
   {
-    { "read",  ReadSession  },
-    { "write", WriteSession },
-    { "wait",  WaitData     },
-    { "close", CloseSession },
-    { "__gc",  CloseSession },
-    { NULL,    NULL         }
+    { "read",     ReadSession  },
+    { "write",    WriteSession },
+    { "wait",     WaitData     },
+    { "close",    CloseSession },
+    { "endpoint", GetEndpoint  },
+    { "__gc",     CloseSession },
+    { NULL,       NULL         }
   };
 
   static const luaL_Reg functions[] =

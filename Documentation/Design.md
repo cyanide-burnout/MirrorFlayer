@@ -142,6 +142,15 @@ which are described again when they differ. Values come as text in protocol
 `slot/X/Y`; a slot that is gone (42704 on `START_REPLICATION`) asks for a
 full load.
 
+### SCRAM-SHA-256-PLUS of PostgreSQL
+
+Over TLS, when the server offers `SCRAM-SHA-256-PLUS`, the client takes it
+with the GS2 header `p=tls-server-end-point,,` and sends `c=` as base64 of the
+header and the channel binding: the hash of the certificate of the server by
+the hash of its signature, SHA-256 for MD5 and SHA-1 (RFC 5929),
+`session:endpoint()` of `Support.so`. The proof then holds only for that TLS
+session. Over TLS without PLUS the header is `y,,`, without TLS `n,,`.
+
 ### Streamed transactions of PostgreSQL
 
 PostgreSQL 14 and later get `proto_version '2', streaming 'on'`: a
@@ -331,9 +340,10 @@ TIMESTAMP) are read as MySQL prints them, others as `base64:typeN:...`.
 * `client_ed25519`: the server sends a nonce of 32 bytes in the switch
   request, the client answers with an Ed25519 signature whose expanded key is
   SHA-512 of the password itself (not of a 32-byte seed). EVP of OpenSSL
-  takes only seeds, so `Support.c` does the group operations of
-  edwards25519 over BIGNUM (extended coordinates, the unified addition);
-  checked against the vectors of RFC 8032, where a 32-byte password is a seed.
+  takes only seeds; libsodium has the group and scalar operations
+  (`crypto_scalarmult_ed25519_base_noclamp`, `crypto_core_ed25519_scalar_*`)
+  to sign with an expanded key. Checked against the vectors of RFC 8032,
+  where a 32-byte password is a seed.
 * `parsec` (11.6 and later): a scramble of the server in the switch request,
   an empty answer asks for `'P'`, the iteration factor and 18 bytes of salt;
   the key is PBKDF2-HMAC-SHA512 over `1024 << factor` rounds, the answer a

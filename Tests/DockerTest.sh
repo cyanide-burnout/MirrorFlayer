@@ -121,9 +121,14 @@ case "$SERVER" in
     ;;
 esac
 
+# The image the test runs in: the one of Tarantool with the libraries
+# Support.so needs beyond it (libsodium)
+RUN_IMAGE=mirrorflayer-run:$$
+
 cleanup() {
   docker rm -f -v "$DATABASE" "$TARANTOOL" "$BUILD" >/dev/null 2>&1 || true
   docker network rm "$NETWORK" >/dev/null 2>&1 || true
+  docker rmi "$RUN_IMAGE" >/dev/null 2>&1 || true
   rm -rf "$WORK"
 }
 
@@ -132,8 +137,11 @@ trap cleanup EXIT INT TERM
 mkdir -p "$WORK/data" "$WORK/late" "$WORK/certs"
 
 echo "building Support.so"
+printf 'FROM %s\nRUN apt-get update -qq >/dev/null && apt-get install -y -qq libsodium23 >/dev/null && rm -rf /var/lib/apt/lists/*\n' \
+  "$TARANTOOL_IMAGE" | docker build -q -t "$RUN_IMAGE" - >/dev/null
+
 docker run --rm --name "$BUILD" -v "$SOURCE:/src" -w /src --entrypoint sh "$TARANTOOL_IMAGE" -c \
-  "apt-get update -qq >/dev/null 2>&1; apt-get install -y -qq gcc make libssl-dev zlib1g-dev libzstd-dev pkg-config >/dev/null 2>&1; make SUPPORT=1 && chown $(id -u):$(id -g) Source/Support.so"
+  "apt-get update -qq >/dev/null 2>&1; apt-get install -y -qq gcc make libssl-dev zlib1g-dev libzstd-dev libsodium-dev pkg-config >/dev/null 2>&1; make SUPPORT=1 && chown $(id -u):$(id -g) Source/Support.so"
 
 docker network create "$NETWORK" >/dev/null
 docker run -d --name "$DATABASE" --network "$NETWORK" "$@" >/dev/null
@@ -195,7 +203,7 @@ phase() {
     -v "$SOURCE:/src:ro" -v "$WORK/$2:/data" -v "$WORK/certs:/certs:ro" -w /src \
     -v "$SOURCE/Source:/usr/share/tarantool/MirrorFlayer:ro" \
     -v "$SOURCE/Source:/usr/lib/x86_64-linux-gnu/tarantool/MirrorFlayer:ro" \
-    --entrypoint env "$TARANTOOL_IMAGE" -u TT_APP_NAME -u TT_INSTANCE_NAME \
+    --entrypoint env "$RUN_IMAGE" -u TT_APP_NAME -u TT_INSTANCE_NAME \
     tarantool "$TEST" "$1"
 }
 

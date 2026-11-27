@@ -131,6 +131,13 @@ function Transport:close()
   end
 end
 
+-- The channel binding tls-server-end-point of the TLS session, nil without TLS
+function Transport:endpoint()
+  if self.session ~= nil then
+    return self.session:endpoint()
+  end
+end
+
 function Transport:fd()
   return self.sock:fd()
 end

@@ -216,19 +216,29 @@ function Connection:password(payload)
   self:send('p', payload)
 end
 
+-- SCRAM-SHA-256, over TLS SCRAM-SHA-256-PLUS when the server offers it: the
+-- channel binding tls-server-end-point ties the password to the TLS session,
+-- so a man in the middle with a certificate of its own cannot pass it on.
+-- Over TLS without PLUS the client says it could bind ('y'), as libpq does
 function Connection:scram(mechanisms)
-  local found = false
+  local offered = {}
   for mechanism in string.gmatch(mechanisms, '[^%z]+') do
-    if mechanism == 'SCRAM-SHA-256' then
-      found = true
-    end
+    offered[mechanism] = true
   end
-  if not found then
+  if not offered['SCRAM-SHA-256'] and not offered['SCRAM-SHA-256-PLUS'] then
     fatal('the server offers no SCRAM-SHA-256: %s', string.gsub(mechanisms, '%z', ' '))
   end
+  local mechanism, header, binding = 'SCRAM-SHA-256', 'n,,', ''
+  if self.secure then
+    header = 'y,,'
+    if offered['SCRAM-SHA-256-PLUS'] then
+      mechanism, header, binding = 'SCRAM-SHA-256-PLUS', 'p=tls-server-end-point,,', self.stream:endpoint()
+    end
+  end
+  self.mechanism = mechanism
   local nonce = base64(digest.urandom(18))
   local first = 'n=,r=' .. nonce
-  self:password('SCRAM-SHA-256\0' .. i32(#first + 3) .. 'n,,' .. first)
+  self:password(mechanism .. '\0' .. i32(#header + #first) .. header .. first)
 
   local kind, payload = self:receive()
   if kind == 'E' then
@@ -246,7 +256,7 @@ function Connection:scram(mechanisms)
   local salted    = digest.pbkdf2(self.options.password or '', digest.base64_decode(values.s), tonumber(values.i), 32)
   local client    = crypto.hmac.sha256(salted, 'Client Key')
   local stored    = digest.sha256(client)
-  local final     = 'c=biws,r=' .. values.r
+  local final     = 'c=' .. base64(header .. binding) .. ',r=' .. values.r
   local message   = first .. ',' .. server .. ',' .. final
   local signature = crypto.hmac.sha256(stored, message)
   self:password(final .. ',p=' .. base64(xor(client, signature)))

@@ -423,6 +423,12 @@ local function load()
 
   ok(replica:stat().loads == 1, 'one full load')
   ok(replica:stat().tls == (TLS ~= 'off'), 'TLS %s, connection %s', TLS, replica:stat().tls and 'encrypted' or 'plain')
+  -- Over TLS SCRAM-SHA-256-PLUS binds the password to the TLS session
+  local probe = protocol.connect({ host = HOST, port = 5432, user = 'replica', password = 'secret', database = 'postgres',
+    timeout = 30, tls = TLS ~= 'off' and { verify = 'none' } or nil })
+  ok(probe.mechanism == (TLS ~= 'off' and 'SCRAM-SHA-256-PLUS' or 'SCRAM-SHA-256'), 'SCRAM mechanism %s',
+    tostring(probe.mechanism))
+  probe:close()
   locations_equal('load')
   ok(box.space.GlobalProfiles:count() == 20000, 'GlobalProfiles has 20000 rows')
   ok(encode(box.space.GlobalProfiles:get(5)) == encode({ 5, 'C5', 1, 5 }), 'GlobalProfiles columns follow the space format')

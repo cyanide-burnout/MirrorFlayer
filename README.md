@@ -15,7 +15,8 @@ Tarantool type.
 MariaDB, MySQL and PostgreSQL, with or without TLS; `mysql_native_password`,
 `caching_sha2_password`, `sha256_password`, `client_ed25519`, `parsec`,
 `mysql_clear_password` and `dialog` (PAM of MariaDB, the password answers
-its password questions), `SCRAM-SHA-256` and `md5`. With
+its password questions), `SCRAM-SHA-256`, over TLS `SCRAM-SHA-256-PLUS`
+(the password bound to the TLS session), and `md5`. With
 MySQL and MariaDB the traffic is compressed (the compressed protocol, zstd
 where MySQL has it, zlib otherwise), and compressed binlogs are read: events
 of MariaDB (`log_bin_compress`) and transactions of MySQL
@@ -267,8 +268,10 @@ they are installed as `$(PREFIX)/share/tarantool/MirrorFlayer/` with the
 file Lua looks for in a package directory. `Source/Support.c` is
 `MirrorFlayer.Support` (TLS, RSA and inflate), installed as
 `$(PREFIX)/lib/<triplet>/tarantool/MirrorFlayer/Support.so`; it needs the
-headers of `tarantool-dev`, `libssl-dev`, `zlib1g-dev` and `libzstd-dev` and
-links the system OpenSSL, zlib and zstd. Up to 2.2 it was `MirrorFlayer.TLS` (`TLS.so`).
+headers of `tarantool-dev`, `libssl-dev`, `zlib1g-dev`, `libzstd-dev` and
+`libsodium-dev` and links the system OpenSSL, zlib, zstd and libsodium: a host
+needs their libraries (`libsodium23` is not in every image), or the module does
+not load at all. Up to 2.2 it was `MirrorFlayer.TLS` (`TLS.so`).
 
 ```
 make                                       # Source/Support.so, stripped (STRIP=true keeps it as built)
