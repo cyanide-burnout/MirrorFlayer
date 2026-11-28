@@ -12,7 +12,8 @@
 --                                     changes after the position, until an error:
 --                                     handler:started(), handler:commit(changes,
 --                                     position, event_time), handler:heartbeat(),
---                                     handler:refresh(source)
+--                                     handler:refresh(source), handler:unmapped(
+--                                     database, table) for a table not mapped
 --   session:close()
 -- A change is { source, operation, old, new }; operation is 'insert',
 -- 'update' or 'delete', old and new are rows in the order of source.columns.
@@ -302,6 +303,7 @@ function Session:event(packet, inside)
     local source = self.sources[map.schema .. '.' .. map.table]
     if source == nil then
       self.maps[map.id] = false
+      self.handler:unmapped(map.schema, map.table)
       return
     end
     if source.stale or #map.types ~= #source.columns then

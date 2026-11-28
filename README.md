@@ -97,6 +97,7 @@ replica:start()
 replica:stat()   -- status, host, position, lag, event time, tls, compressed, counters (transactions, rows, loads, fills, split, aborts), last error
 replica:reload() -- restart with a full load over the spaces
 replica:reload(true) -- the same, each space emptied right before its table is loaded
+replica:reconnect({ 'Registry.Users' }) -- a new session at once, Registry.Users loaded alone before the stream
 replica:stop()
 ```
 
@@ -122,7 +123,7 @@ Configuration is Lua only.
 | `server`    | —              | MySQL: server id of this replica, unique among the replicas of the source |
 | `database`  | `user`         | PostgreSQL: the database |
 | `slot`      | `'mirrorflayer'` | PostgreSQL: the logical replication slot, one per replicator |
-| `publication` | `'mirrorflayer'` | PostgreSQL: the publication of the mapped tables (`CREATE PUBLICATION mirrorflayer FOR TABLE ...`) |
+| `publication` | `'mirrorflayer'` | PostgreSQL: the publication of the mapped tables (`CREATE PUBLICATION mirrorflayer FOR TABLE ...`); with `handlers.discover` one of all tables (`FOR ALL TABLES`) or of schemas (`FOR TABLES IN SCHEMA ...`, PostgreSQL 15 and later), since a table outside the publication never arrives (see *Handlers*) |
 | `tls`       | `false`        | `true` for TLS without verification, or `{ verify = 'none' \| 'ca' \| 'identity', ca = 'ca.pem', cert = 'client.pem', key = 'client.key' }`; with `ca` verification defaults to `'ca'`, without it to `'none'`; `'ca'` and `'identity'` without `ca` use the system store. Needs `MirrorFlayer.Support` |
 | `compress`  | `true`         | MySQL and MariaDB: the compressed protocol when the server has it and `MirrorFlayer.Support` is there, zstd of MySQL 8.0.18 and later, zlib otherwise; the server compresses, the replicator inflates. PostgreSQL has no compression in its protocol |
 | `public_key` | —             | PEM public key of the source for `caching_sha2_password`/`sha256_password` without TLS; without it the key is asked from the server (open to a man in the middle) |
@@ -142,7 +143,9 @@ Configuration is Lua only.
 
 ### Mapping
 
-`replica:map(database, table, target, columns)` — only before `start()`.
+`replica:map(database, table, target, columns)` — before `start()`, or on a
+running replicator, where it takes effect at the next connection
+(`replica:reconnect()`).
 For PostgreSQL `database` is the schema; schema, table and column names are
 the ones of the catalogue, case-sensitive.
 Targets are looked up by the replication fiber, so `start()` may come before
@@ -177,6 +180,85 @@ with no tuples before a full reload, followed by `'insert'` for every row of
 the snapshot. It is called **inside the box transaction**: it must not yield
 (no network, no `fiber.sleep`, no waiting on channels), or the transaction
 is aborted.
+
+### Handlers
+
+`MirrorFlayer.new(config, handlers)` takes the functions of the application
+apart from the configuration, which stays plain data (a JSON file of a
+plug-in goes in as it is). `handlers` is optional; an unknown key is
+refused. The functions stay in TX, a replicator with `thread` calls them
+there.
+
+```lua
+local replica = MirrorFlayer.new(json.decode(settings), {
+  discover = function (replica, database, table, columns)
+    if database ~= 'accounting' then
+      return false                  -- ignored until stop()
+    end
+    if table ~= nil then
+      fiber.create(function ()      -- learn what the table is, then
+        replica:map(database, table, function (operation, old, new) ... end, names)
+        replica:reconnect({ database .. '.' .. table })
+      end)
+    end
+    return true                     -- handled
+  end,
+  fail = function (replica, problem)
+    alarm(problem.host, problem.message) -- the connection is lost, the server refused...
+  end
+})
+```
+
+`discover(replica, database, table, columns)` is called for what the stream
+brings and nothing maps:
+
+* a database (the schema of PostgreSQL) none of whose tables is mapped, once,
+  with `table` and `columns` `nil`: anything but `true` ignores it with all
+  its tables, which are not asked about;
+* a table, once, with its columns `{ name, type }` (the type as the source
+  names it, `int`, `varchar`, `int4`; `nil` when the table could not be
+  described, dropped meanwhile).
+
+`true` means the application handles it: it is not asked about again in this
+session, and again after the next connection while it is still not mapped.
+Anything else ignores it until `stop()`. Rows of a table that is not mapped
+are skipped either way. A table is described over a connection of its own,
+with the user of the replicator, which needs `SELECT` on it (`USAGE` on its
+schema in PostgreSQL).
+
+`discover` runs in the replication fiber, outside of a box transaction: it
+may yield, but the stream waits for it. `map()` and `reconnect()` may be
+called right there, both only record; work with the network belongs in a
+fiber of its own.
+
+`fail(replica, problem)` is called for every failed session: a connection
+lost or refused, an error of the server, a stream that ended. `problem` is
+`{ message, code, host, port, fatal, reload }`: `code` is the error of the
+source when known, `fatal` means the replicator has stopped (`stat().status`
+is `'failed'`), otherwise it connects again after `retry`, to the next host;
+`reload` means a full load follows. `stop()`, a cancel from outside and
+`reconnect()` are not failures. It runs in TX like `discover`, and the
+loop waits for it.
+
+MySQL and MariaDB bring every database of the server unless the server
+filters its binlog (`binlog-do-db`). PostgreSQL brings the tables of the
+publication of the database of `config.database` only: the publication has
+to be of all tables or of schemas, which its administrator makes;
+MirrorFlayer does not change it.
+
+### Reconnect
+
+`replica:reconnect(tables)` ends the session after the current source
+transaction (at the next heartbeat when the source is idle) and connects
+again at once, without the pause of `retry` and without an error in
+`stat()`. The new session describes the tables again, takes the ones
+`map()` added since and loads the tables listed by their `'database.table'`
+ids alone before the stream (`stat().fills`), function targets included
+(`'reset'`, then `'insert'` for every row); each of them has to be mapped.
+The stream then comes from the stored position over the loaded rows and
+converges, as for a space emptied by hand: for a moment between the load
+and the stored position a trigger may see an older version of a row, and a
+function target has to be idempotent.
 
 ### Threads
 
@@ -381,6 +463,12 @@ without GTIDs (the position is a binlog file and offset).
 4. `late` — a fresh instance started before its space exists retries, loads
    everything once the space is made, and stops quietly when its fiber is
    cancelled from outside.
+5. `discover` — `handlers.discover` while streaming: a new database ignored
+   is asked about once and its tables never, a new table mapped by the
+   handler with `reconnect()` arrives with the rows written before, a table
+   handled without a mapping is asked about again after the reconnect, an
+   ignored one is not; `map()` at run time with `reconnect()` of an idle
+   source.
 
 `Tests/RemoteTest.sh host` copies the tree to a Docker host over ssh and
 runs the test there with the same variables:

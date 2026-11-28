@@ -114,7 +114,8 @@ local function remote(name)
 end
 
 -- Starts the Runner of a replicator when this is its thread: argument is
--- { config, sources, thread_id }. Returns true when it started here
+-- { config, thread_id }; the Runner asks TX for the mapped tables with every
+-- session. Returns true when it started here
 local function start(name, argument)
   if threads.info().thread_id ~= argument.thread_id then
     return false
@@ -122,7 +123,7 @@ local function start(name, argument)
   if runners[name] ~= nil then
     runners[name]:stop()
   end
-  local runner = Runner.new(argument.config, argument.sources, remote(name))
+  local runner = Runner.new(argument.config, remote(name))
   runner:start()
   runners[name] = runner
   return true
@@ -215,13 +216,14 @@ local function eval(group, command, name, argument)
   return threads.eval(group, BOOT, { package.path, package.cpath, command, name, argument or {} })
 end
 
--- Starts the Runner of a replica in its thread
-local function launch(replica, specs)
+-- Starts the Runner of a replica in its thread; the handlers of the replica
+-- stay in TX
+local function launch(replica)
   local config = replica.config
   export()
   replicas[config.name] = replica
   local results         = eval(config.thread, 'start', config.name,
-    { config = config, sources = specs, thread_id = config.thread_id })
+    { config = config, thread_id = config.thread_id })
   for _, result in ipairs(results) do
     if result[1] == true then
       return

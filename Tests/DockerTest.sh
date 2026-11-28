@@ -140,7 +140,7 @@ cleanup() {
 
 cleanup
 trap cleanup EXIT INT TERM
-mkdir -p "$WORK/data" "$WORK/late" "$WORK/certs" "$WORK/krb"
+mkdir -p "$WORK/data" "$WORK/late" "$WORK/discover" "$WORK/certs" "$WORK/krb"
 
 echo "building Support.so"
 printf 'FROM %s\nRUN apt-get update -qq >/dev/null && apt-get install -y -qq libsodium23 >/dev/null && rm -rf /var/lib/apt/lists/*\n' \
@@ -248,4 +248,5 @@ phase load data
 phase resume data
 phase purge data
 phase late late
+phase discover discover
 echo "all phases passed ($SERVER_IMAGE, TLS $TLS, thread $THREAD, compress $COMPRESS, binlog compress $BINLOG_COMPRESS, row image $ROW_IMAGE, partial JSON $PARTIAL_JSON, GTID $GTID)"

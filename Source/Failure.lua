@@ -1,7 +1,8 @@
 -- Errors raised by MirrorFlayer and its drivers: failure objects with a
 -- message and, when known, the error code of the source. fatal stops the
 -- replicator instead of reconnecting; reload makes the next connection start
--- with a full load (the position is lost, the table changed under the stream)
+-- with a full load (the position is lost, the table changed under the stream);
+-- reconnect ends the session for a new one at once (replica:reconnect())
 
 local Failure      = {}
 Failure.__index    = Failure
@@ -28,8 +29,16 @@ local function reload(format, ...)
   error(problem, 0)
 end
 
+-- Raises a failure that ends the session for a new one at once
+local function reconnect()
+  local problem     = failure('reconnect asked')
+  problem.reconnect = true
+  error(problem, 0)
+end
+
 return {
-  failure = failure,
-  fatal   = fatal,
-  reload  = reload
+  failure   = failure,
+  fatal     = fatal,
+  reload    = reload,
+  reconnect = reconnect
 }

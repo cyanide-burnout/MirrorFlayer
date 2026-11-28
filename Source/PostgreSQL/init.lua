@@ -6,8 +6,9 @@
 -- load and the stream meet exactly. The stream confirms the LSN of every
 -- applied transaction to the server, which then frees the WAL before it.
 --
--- The server needs wal_level=logical, a publication of the mapped tables and
--- a role with REPLICATION (or a superuser). UPDATE and DELETE send the old
+-- The server needs wal_level=logical, a publication of the mapped tables (of
+-- all tables or of their schemas for handlers.discover, which sees only what
+-- the publication has) and a role with REPLICATION (or a superuser). UPDATE and DELETE send the old
 -- key of the REPLICA IDENTITY (the primary key by default): the primary key
 -- of a target space has to be among its columns, or the table needs REPLICA
 -- IDENTITY FULL. The slot keeps WAL while the replicator is away; drop it
@@ -201,6 +202,7 @@ function Session:relation(message)
   local source                     = self.sources[message.namespace .. '.' .. message.name]
   self.relations[message.relation] = message
   if source == nil then
+    self.handler:unmapped(message.namespace, message.name)
     return
   end
   local function bind()

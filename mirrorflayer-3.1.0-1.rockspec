@@ -1,9 +1,9 @@
 package = 'mirrorflayer'
-version = '3.0.0-1'
+version = '3.1.0-1'
 
 source = {
   url    = 'git+https://github.com/cyanide-burnout/MirrorFlayer.git',
-  tag    = '3.0.0'
+  tag    = '3.1.0'
 }
 
 description = {

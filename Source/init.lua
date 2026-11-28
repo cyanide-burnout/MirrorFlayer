@@ -13,6 +13,18 @@
 --   })
 --   replica:map('Registry', 'Locations', 'GlobalLocations', { 'ID', 'Node', 'Kind', 'Link', 'Slot', 'Modified' })
 --   replica:start()
+--
+-- handlers, the second argument of new(), are functions of the application
+-- kept in TX, apart from the configuration, which stays plain data:
+--   discover(replica, database, table, columns)
+--                       an unmapped database (table nil) or table met in the
+--                       stream; true: the application handles it (map() and
+--                       reconnect(), asked again after a reconnect while it is
+--                       not mapped), anything else ignores it until stop()
+--   fail(replica, problem)
+--                       a session failed: problem is { message, code, host,
+--                       port, fatal, reload }; fatal: the replicator stopped,
+--                       otherwise it connects again after retry
 
 local fiber = require('fiber')
 local clock = require('clock')
@@ -39,6 +51,9 @@ local DEFAULTS = {
   retry     = 5,
   thread_id = 1
 }
+
+-- Handlers new() takes
+local HANDLERS = { discover = true, fail = true }
 
 local Replica   = {}
 Replica.__index = Replica
@@ -71,9 +86,16 @@ end
 -- that a node of Galera is ready), timeout (seconds), batch (rows per
 -- transaction), retry (seconds between connection attempts), thread (a group
 -- of application threads to run the source side in) and thread_id (which
--- thread of it, 1 by default)
-local function new(config)
+-- thread of it, 1 by default). handlers: see the top of the file
+local function new(config, handlers)
   check(type(config) == 'table', 'config must be a table')
+  check(handlers == nil or type(handlers) == 'table', 'handlers must be a table')
+  local functions = {}
+  for key, value in pairs(handlers or {}) do
+    check(HANDLERS[key], 'unknown handler %s', tostring(key))
+    check(type(value) == 'function', 'handlers.%s must be a function', key)
+    functions[key] = value
+  end
   local options = {}
   for key, value in pairs(DEFAULTS) do
     options[key] = value
@@ -117,12 +139,15 @@ local function new(config)
   check((type(options.key) == 'number' and options.key >= 0 and options.key == math.floor(options.key)) or
     type(options.key) == 'string', 'config.key must be an unsigned integer or a string')
   return setmetatable({
-    config  = options,
-    driver  = driver,
-    sources = {},
-    order   = {},
-    loaders = {},
-    status  = 'created',
+    config   = options,
+    handlers = functions,
+    driver   = driver,
+    sources  = {},
+    order    = {},
+    loaders  = {},
+    pending  = {},
+    ignored  = { databases = {}, tables = {} },
+    status   = 'created',
     stats   = { transactions = 0, rows = 0, loads = 0, fills = 0, split = 0 }
   }, Replica)
 end
@@ -130,9 +155,9 @@ end
 -- Maps a source table to a target: a space name or function (operation, old,
 -- new) called inside the transaction ('insert' | 'update' | 'delete', and
 -- 'reset' before a full reload). columns are source column names in tuple
--- order; by default the field names of the space format.
+-- order; by default the field names of the space format. On a running
+-- replicator it takes effect at the next connection (reconnect()).
 function Replica:map(database, table_name, target, columns)
-  check(not self.running, 'map() must be called before start()')
   check(type(database) == 'string' and type(table_name) == 'string', 'database and table must be strings')
   check(type(target) == 'string' or type(target) == 'function', 'target must be a space name or function')
   check(columns == nil or type(columns) == 'table', 'columns must be an array of names')
@@ -144,6 +169,7 @@ function Replica:map(database, table_name, target, columns)
     table.insert(self.order, source)
   end
   table.insert(source.specs, { target = target, columns = columns })
+  self.bound = false
   return self
 end
 
@@ -156,7 +182,10 @@ end
 -- Resolves the target spaces and opens the position space. The Runner asks
 -- for it with every session, so start() may be called before other code has
 -- made the spaces; a missing space is retried with the connection.
+-- A session starts: a reconnect() asked for is done, the targets are bound
+-- again after map()
 function Replica:bind()
+  self.reconnecting = false
   if self.bound then
     return
   end
@@ -168,6 +197,61 @@ function Replica:bind()
   end
   self.positions = store.position(self.config.position, self.config.key, self.config.name, self.config.type)
   self.bound     = true
+end
+
+-- The mapped tables { id, database, table } in their order for a session, and
+-- whether unmapped ones go to handlers.discover
+function Replica:specs()
+  local specs = {}
+  for index, source in ipairs(self.order) do
+    specs[index] = { id = source.id, database = source.database, table = source.table }
+  end
+  return specs, self.handlers.discover ~= nil
+end
+
+-- An unmapped database (table_name nil, none of its tables mapped) or table
+-- met in the stream: handlers.discover decides once, true when the
+-- application handles it, anything else ignores it until stop(). A table
+-- mapped since, waiting for a reconnect, is not asked about
+function Replica:unmapped(database, table_name, columns)
+  local ignored, key = self.ignored.databases, database
+  if table_name then
+    ignored, key = self.ignored.tables, database .. '.' .. table_name
+    if self.sources[key] then
+      return true
+    end
+  else
+    for _, source in ipairs(self.order) do
+      if source.database == database then
+        return true
+      end
+    end
+  end
+  if ignored[key] then
+    return false
+  end
+  local status, result = pcall(self.handlers.discover, self, database, table_name, columns)
+  if not status then
+    self:say('error', 'handlers.discover for %s: %s', key, tostring(result))
+    return false
+  end
+  if result ~= true then
+    ignored[key] = true
+  end
+  return result == true
+end
+
+-- A session failed: handlers.fail gets { message, code, host, port, fatal,
+-- reload }
+function Replica:failed(problem)
+  local handler = self.handlers.fail
+  if not handler then
+    return
+  end
+  local status, result = pcall(handler, self, problem)
+  if not status then
+    self:say('error', 'handlers.fail: %s', tostring(result))
+  end
 end
 
 -- Binds the targets of a table to its columns
@@ -191,18 +275,22 @@ function Replica:request_reload()
   self.reload_needed = true
 end
 
--- True when the table has spaces among its targets and all of them are empty
-function Replica:empty(id)
+-- Why a table is loaded alone before the stream, or nil: reconnect() asked
+-- for it, or it has spaces among its targets and all of them are empty
+function Replica:needs(id)
+  if self.pending[id] then
+    return 'asked for by reconnect()'
+  end
   local spaces = 0
   for _, target in ipairs(self.sources[id].targets) do
     if target.space ~= nil then
       if target.space:len() > 0 then
-        return false
+        return nil
       end
       spaces = spaces + 1
     end
   end
-  return spaces > 0
+  return spaces > 0 and 'its spaces are empty' or nil
 end
 
 -- A table is loaded over its targets; with flush its spaces are emptied first
@@ -242,9 +330,11 @@ function Replica:loaded(state)
   self.stats.position = state
   self.reload_needed  = false
   self.flush_needed   = false
+  self.pending        = {}
 end
 
-function Replica:filled()
+function Replica:filled(id)
+  self.pending[id] = nil
   self.stats.fills = self.stats.fills + 1
 end
 
@@ -296,12 +386,15 @@ end
 
 -- The source moved on without changes for the mapped tables (a keepalive of
 -- PostgreSQL); the position is written at most once a second
+-- advance(), heartbeat() and commit() return true when reconnect() asks to
+-- end the session
 function Replica:advance(state)
   self.stats.position = state
   self.dirty          = true
   if clock.time() - (self.stored or 0) >= 1 then
     self:flush()
   end
+  return self.reconnecting
 end
 
 -- Prepared XA transactions wait for their decision in the space named after
@@ -338,6 +431,7 @@ function Replica:heartbeat()
   self.stats.heartbeat_time = clock.time()
   self.stats.lag            = 0
   self:flush()
+  return self.reconnecting
 end
 
 -- Applies a finished source transaction with its position in one box
@@ -354,7 +448,7 @@ function Replica:commit(changes, state, event_time, xid)
     if clock.time() - (self.stored or 0) >= 1 then
       self:flush()
     end
-    return
+    return self.reconnecting
   end
   local statements = {}
   for _, change in ipairs(changes) do
@@ -380,6 +474,7 @@ function Replica:commit(changes, state, event_time, xid)
   stats.lag          = math.max(0, self.stored - event_time)
   stats.transactions = stats.transactions + 1
   stats.rows         = stats.rows + #changes
+  return self.reconnecting
 end
 
 -- Metrics ----------------------------------------------------------------------
@@ -418,7 +513,7 @@ end
 function Replica:start()
   check(not self.running, 'already started')
   check(type(box.cfg) ~= 'function', 'call box.cfg{} before start()')
-  check(#self.order > 0, 'nothing is mapped')
+  check(#self.order > 0 or self.handlers.discover, 'nothing is mapped and there is no handlers.discover')
   local config = self.config
   check(type(config.hosts) == 'table' and #config.hosts > 0, 'config.hosts must be a non-empty array')
   check(type(config.user) == 'string', 'config.user must be a string')
@@ -437,20 +532,19 @@ function Replica:start()
     problem = thread.check(config.thread, config.thread_id)
     check(problem == nil, '%s', problem)
   end
-  local specs = {}
-  for index, source in ipairs(self.order) do
-    specs[index] = { id = source.id, database = source.database, table = source.table }
-  end
-  self.bound   = false
-  self.loaders = {}
-  self.status  = 'starting'
+  self.bound        = false
+  self.loaders      = {}
+  self.pending      = {}
+  self.ignored      = { databases = {}, tables = {} }
+  self.reconnecting = false
+  self.status       = 'starting'
   store.configure(config.batch)
   self:register()
   if thread ~= nil then
-    thread.launch(self, specs)
+    thread.launch(self)
     self.thread = thread
   else
-    self.runner = Runner.new(config, specs, self)
+    self.runner = Runner.new(config, self)
     self.fiber  = self.runner:start()
   end
   self.running               = true
@@ -490,6 +584,24 @@ function Replica:reload(flush)
   return self:start()
 end
 
+-- Ends the session after the current source transaction (at the next
+-- heartbeat when the source is idle) and connects again at once, without a
+-- pause: the tables are described again, the ones map() added since come in,
+-- and the tables listed by their 'database.table' ids are loaded alone before
+-- the stream, which comes from the stored position over them
+function Replica:reconnect(tables)
+  check(self.running, 'not started')
+  check(tables == nil or type(tables) == 'table', 'tables must be an array of database.table ids')
+  for _, id in ipairs(tables or {}) do
+    check(self.sources[id], '%s is not mapped', tostring(id))
+  end
+  for _, id in ipairs(tables or {}) do
+    self.pending[id] = true
+  end
+  self.reconnecting = true
+  return self
+end
+
 -- Returns the state: status, host, position (of the source), event_time (source
 -- time of the last applied transaction), applied_time, lag (seconds between
 -- the two, 0 after a heartbeat), the counters transactions, rows, loads (full
@@ -520,5 +632,5 @@ end
 
 return {
   new      = new,
-  _VERSION = '3.0.0'
+  _VERSION = '3.1.0'
 }

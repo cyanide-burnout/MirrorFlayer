@@ -62,8 +62,33 @@ MySQL). Tarantool 3.x (LuaJIT).
   columns of all tables (with the checks of MariaDB), the position, the load of
   all tables, the variables of the replica with the checksum of the binlog.
 * **Tables loaded alone.** A table whose spaces are all empty while a
-  position is stored is loaded by itself before the stream (`fills`); the
-  stream from the older position converges over it.
+  position is stored, or one `reconnect(tables)` names, is loaded by itself
+  before the stream (`fills`); the stream from the older position converges
+  over it.
+* **Sessions.** Each session asks the sink for the mapped tables (`specs()`)
+  and binds the targets again after `map()`, so mappings added on a running
+  replicator, in TX or in a thread, take effect at the next connection.
+  `reconnect()` sets a flag the sink returns from `commit`, `advance` and
+  `heartbeat` (no extra call from a thread); the Runner then raises a failure
+  of the kind `reconnect`, which the loop takes without the pause of `retry`,
+  without an error and on the same host. The position of the transaction is
+  stored by then.
+* **Discovery.** A table of the stream that nothing maps (a `TABLE_MAP` of
+  MySQL, a `Relation` of PostgreSQL) goes to `handler:unmapped()` of the
+  driver. Without `handlers.discover` the Runner returns at once. Otherwise it
+  asks once a session: first about the database when none of its tables is
+  mapped, then about the table with its columns, described over a connection
+  of its own as `refresh` does after DDL; one that cannot be described gets
+  `nil` rather than breaking the session. The handler runs in TX (a thread
+  calls it through `mirrorflayer.call`), outside of a box transaction, since
+  rows are applied at the commit. Its answers live in the replicator: an
+  ignored database or table is never asked about again until `stop()`, a
+  handled one again in the next session while it is not mapped.
+* **Failures.** Every failed session, after it is logged and reported in
+  `stat()`, goes to `sink:failed()` as plain data `{ message, code, host,
+  port, fatal, reload }`, which crosses from a thread as it is, and from there
+  to `handlers.fail` in TX. `stop()`, a cancel and `reconnect()` end the loop
+  or the session before it and are not reported.
 * **Dialects.** The greeting tells MariaDB (`MariaDB` in the version) from
   MySQL, and `MirrorFlayer.MySQL.MariaDB` or `MirrorFlayer.MySQL.GTID` handles the GTID
   format, the GTID event and the stream request. A MariaDB GTID event says
@@ -88,7 +113,7 @@ installed as `MirrorFlayer/MySQL/`, its `init.lua` being the driver itself.
 | `MirrorFlayer` (`Source/init.lua`) | the replicator in TX: API, targets, loads and transactions applied, positions, statistics, metrics |
 | `MirrorFlayer.Runner` | the loop with the source: hosts, retries, sessions, columns, full loads, the stream; it touches no space, a sink takes what concerns them |
 | `MirrorFlayer.Thread` | the Runner in an application thread, its sink a proxy to the replicator in TX through `threads.call` |
-| `MirrorFlayer.Failure` | failure objects: fatal stops the replicator, reload asks for a full load |
+| `MirrorFlayer.Failure` | failure objects: fatal stops the replicator, reload asks for a full load, reconnect ends the session for a new one at once |
 | `MirrorFlayer.Column` | values in their Tarantool types, datetime and json modes |
 | `MirrorFlayer.Store` | targets, pacing of writes, full load, position |
 | `MirrorFlayer.Transport` | `read(n)`/`write(s)`/`close()`; plain TCP over the Tarantool `socket`, `secure()` moves it onto TLS |

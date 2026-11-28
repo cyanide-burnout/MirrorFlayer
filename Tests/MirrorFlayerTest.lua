@@ -8,6 +8,8 @@
 --           table whose space was emptied is loaded alone
 --   purge   the position is purged from the binlog: error 1236, full reload
 --   late    a fresh instance started before its space exists
+--   discover unmapped databases and tables go to handlers.discover, map() at
+--           run time and reconnect(tables), failed sessions to handlers.fail
 
 local ffi       = require('ffi')
 local fiber     = require('fiber')
@@ -769,7 +771,102 @@ local function late()
   replica:stop()
 end
 
-local phases = { load = load, resume = resume, purge = purge, late = late }
+-- Unmapped tables go to handlers.discover: a database is asked about once and
+-- an ignored one never again, a table the handler maps and reconnects for
+-- arrives with the rows written before, a table it handles without mapping
+-- is asked again after the reconnect; map() at run time with reconnect() of
+-- an idle source
+local function discover()
+  box.schema.space.create('GlobalLocations', { if_not_exists = true })
+  box.space.GlobalLocations:create_index('ID', { if_not_exists = true, parts = { 1, 'unsigned' } })
+  box.schema.space.create('FreshItems', { if_not_exists = true })
+  box.space.FreshItems:create_index('ID', { if_not_exists = true, parts = { 1, 'unsigned' } })
+  box.schema.space.create('DiscoveredGateways', { if_not_exists = true })
+  box.space.DiscoveredGateways:create_index('Gateway', { if_not_exists = true, parts = { 1, 'unsigned', 2, 'unsigned' } })
+  exec('DROP DATABASE IF EXISTS Fresh', 'DROP DATABASE IF EXISTS Ignored')
+  local config = threaded({
+    hosts = { 'mirrorflayer-nowhere:3306', HOST .. ':3306' }, user = 'replica', password = 'secret', server = KEY + 1,
+    name = 'Discovery',
+    heartbeat = 1, retry = 1, check = 1,
+    tls = (TLS == 'on' and true) or (TLS == 'ca' and { ca = '/certs/ca.pem' }) or false, compress = COMPRESS
+  })
+  ok(not pcall(MirrorFlayer.new, config, { discovered = function () end }), 'new() refuses an unknown handler')
+  local asked, described, failures = {}, nil, {}
+  local replica = MirrorFlayer.new(config, {
+    fail = function (replica, problem)
+      table.insert(failures, problem)
+    end,
+    discover = function (replica, database, table_name, columns)
+      local key   = table_name and database .. '.' .. table_name or database
+      asked[key] = (asked[key] or 0) + 1
+      if key == 'Fresh.Items' then
+        described = columns
+        replica:map('Fresh', 'Items', 'FreshItems', { 'ID', 'Name' })
+        replica:reconnect({ 'Fresh.Items' })
+      end
+      return key == 'Fresh' or key == 'Fresh.Items' or key == 'Registry.Other'
+    end
+  })
+  replica:map('Registry', 'Locations', 'GlobalLocations', { 'ID', 'Node', 'Kind', 'Link', 'Slot', 'Modified' })
+  replica:start()
+  caught_up(replica)
+  local first = failures[1]
+  ok(first ~= nil and first.host == 'mirrorflayer-nowhere' and first.fatal == false and type(first.message) == 'string' and
+    first.message ~= '', 'fail gets the failed session of the host that is not there: %s',
+    first and tostring(first.message) or 'none')
+  local failed = #failures
+  ok(not pcall(replica.reconnect, replica, { 'Fresh.Items' }), 'reconnect() refuses a table that is not mapped')
+  exec('CREATE DATABASE Ignored',
+    'CREATE TABLE Ignored.T (ID INT PRIMARY KEY)',
+    'INSERT INTO Ignored.T VALUES (1), (2)',
+    'INSERT INTO Ignored.T VALUES (3)',
+    'CREATE DATABASE Fresh',
+    'CREATE TABLE Fresh.Items (ID INT UNSIGNED PRIMARY KEY, Name VARCHAR(20))',
+    "UPDATE Registry.Users SET Text = 'd1' WHERE ID = 1",
+    "INSERT INTO Registry.Other (Value) VALUES ('d1')",
+    "INSERT INTO Fresh.Items VALUES (1, 'one'), (2, 'two')",
+    "INSERT INTO Fresh.Items VALUES (3, 'three')",
+    "UPDATE Fresh.Items SET Name = 'deux' WHERE ID = 2",
+    "UPDATE Registry.Users SET Text = 'd2' WHERE ID = 1",
+    "INSERT INTO Registry.Other (Value) VALUES ('d2')",
+    'INSERT INTO Ignored.T VALUES (4)')
+  caught_up(replica)
+  ok(asked.Ignored == 1 and asked['Ignored.T'] == nil, 'an ignored database is asked about once, its tables never')
+  ok(asked.Fresh == 1 and asked['Fresh.Items'] == 1 and asked.Registry == nil,
+    'a new database and its table asked about once, a mapped database never')
+  ok(asked['Registry.Users'] == 1, 'an ignored table is not asked about again after a reconnect (%s)',
+    tostring(asked['Registry.Users']))
+  ok(asked['Registry.Other'] == 2, 'a table handled without a mapping is asked about again after a reconnect (%s)',
+    tostring(asked['Registry.Other']))
+  ok(type(described) == 'table' and #described == 2 and described[1].name == 'ID' and described[1].type == 'int' and
+    described[2].name == 'Name' and described[2].type == 'varchar', 'discover gets the columns with their types')
+  local items = {}
+  for _, tuple in box.space.FreshItems:pairs() do
+    items[tuple[1]] = tuple[2]
+  end
+  ok(box.space.FreshItems:count() == 3 and items[1] == 'one' and items[2] == 'deux' and items[3] == 'three',
+    'the discovered table arrived with the rows written before it was mapped (%d rows)', box.space.FreshItems:count())
+  ok(replica:stat().fills == 1 and replica:stat().loads == 1 and replica:stat().error == nil,
+    'loaded alone after the reconnect, without a full load or an error (%d fills, %d loads, %s)',
+    replica:stat().fills, replica:stat().loads, tostring(replica:stat().error))
+  -- map() at run time, reconnect() from outside while the source is idle
+  replica:map('Registry', 'Gateways', 'DiscoveredGateways', { 'BMC', 'TPC', 'Comment' })
+  replica:reconnect({ 'Registry.Gateways' })
+  local gateways = tonumber(sql:value('SELECT COUNT(*) FROM Registry.Gateways'))
+  wait(function ()
+    return replica:stat().fills == 2 and replica:stat().status == 'streaming'
+  end, 'Registry.Gateways loaded after map() and reconnect()', 10)
+  ok(box.space.DiscoveredGateways:count() == gateways, 'map() at run time loaded with reconnect() (%d rows of %d)',
+    box.space.DiscoveredGateways:count(), gateways)
+  exec("INSERT INTO Registry.Gateways VALUES (9, 9, 'discovered')")
+  caught_up(replica)
+  ok(box.space.DiscoveredGateways:get({ 9, 9 }) ~= nil, 'the table mapped at run time streams')
+  ok(#failures == failed, 'a reconnect is not a failure (%d calls of fail, %d before)', #failures, failed)
+  replica:stop()
+  exec('DROP DATABASE Fresh', 'DROP DATABASE Ignored', 'DELETE FROM Registry.Gateways WHERE BMC = 9')
+end
+
+local phases = { load = load, resume = resume, purge = purge, late = late, discover = discover }
 
 local status, problem = pcall(phases[phase] or function () error('unknown phase ' .. tostring(phase), 0) end)
 if not status then
